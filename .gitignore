@@ -1,0 +1,18 @@
+# Secrets
+.env
+.env.*
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# direnv / nix
+.direnv/
+result
+result-*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
