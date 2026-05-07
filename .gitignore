@@ -10,9 +10,25 @@
 result
 result-*
 
+# Local Postgres data dir (managed by `make db-up`)
+.pg/
+
+# Local Valkey data + logs (managed by `make valkey-up`)
+.valkey/
+
+# Generated for `make docs` (Swagger UI loads it from docs/)
+docs/openapi.yaml
+
 # Python
 __pycache__/
 *.py[cod]
 .venv/
 .pytest_cache/
 .ruff_cache/
+
+# Frontend / SvelteKit
+frontend/node_modules/
+frontend/.svelte-kit/
+frontend/build/
+frontend/.vite/
+frontend/.env

@@ -1,0 +1,127 @@
+<script lang="ts">
+  import { api, APIError } from '$lib/api';
+  import type { ArtistSummary } from '$lib/types';
+
+  let {
+    selected = $bindable(),
+  }: {
+    selected: string[];
+  } = $props();
+
+  let query = $state('');
+  let results = $state<ArtistSummary[]>([]);
+  let searching = $state(false);
+  let error = $state<string | null>(null);
+
+  // Cache id → ArtistSummary so we can render chips for selected ids.
+  let cache = $state<Record<string, ArtistSummary>>({});
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  function onInput() {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(runSearch, 300);
+  }
+
+  async function runSearch() {
+    const q = query.trim();
+    if (q.length < 2) {
+      results = [];
+      return;
+    }
+    searching = true;
+    error = null;
+    try {
+      results = await api.spotifySearchArtists(q);
+      for (const a of results) cache[a.id] = a;
+    } catch (e) {
+      error = e instanceof APIError ? e.message : String(e);
+    } finally {
+      searching = false;
+    }
+  }
+
+  function add(a: ArtistSummary) {
+    if (!selected.includes(a.id)) {
+      cache[a.id] = a;
+      selected = [...selected, a.id];
+    }
+    query = '';
+    results = [];
+  }
+
+  function remove(id: string) {
+    selected = selected.filter((x) => x !== id);
+  }
+</script>
+
+<div>
+  <p class="label mb-1">Required artists (track must be by one of these)</p>
+
+  {#if selected.length > 0}
+    <div class="mb-2 flex flex-wrap gap-2">
+      {#each selected as id (id)}
+        {@const a = cache[id]}
+        <button
+          type="button"
+          class="badge bg-accent/20 text-accent hover:bg-accent/30 inline-flex items-center gap-1"
+          onclick={() => remove(id)}
+        >
+          {#if a?.image_url}
+            <img src={a.image_url} alt="" class="h-4 w-4 rounded-full" />
+          {/if}
+          {a?.name ?? id.slice(0, 8)}
+          <span class="ml-1 text-xs">×</span>
+        </button>
+      {/each}
+    </div>
+  {/if}
+
+  <input
+    class="input text-sm"
+    placeholder="search Spotify for an artist…"
+    bind:value={query}
+    oninput={onInput}
+  />
+
+  {#if searching}
+    <p class="mt-2 text-xs text-text-muted">searching…</p>
+  {/if}
+
+  {#if error}
+    <p class="mt-2 text-xs text-danger">{error}</p>
+  {/if}
+
+  {#if results.length > 0}
+    <ul
+      class="mt-2 max-h-48 overflow-y-auto rounded-md border border-border bg-surface-raised"
+    >
+      {#each results as a (a.id)}
+        <li>
+          <button
+            type="button"
+            class="flex w-full items-center gap-3 p-2 text-left hover:bg-surface"
+            disabled={selected.includes(a.id)}
+            onclick={() => add(a)}
+          >
+            {#if a.image_url}
+              <img
+                src={a.image_url}
+                alt=""
+                class="h-8 w-8 flex-shrink-0 rounded-full"
+              />
+            {:else}
+              <div class="h-8 w-8 flex-shrink-0 rounded-full bg-surface"></div>
+            {/if}
+            <span class="min-w-0 flex-1 truncate text-sm">{a.name}</span>
+            {#if selected.includes(a.id)}
+              <span class="text-xs text-success">added</span>
+            {:else}
+              <span class="text-xs text-text-muted">+</span>
+            {/if}
+          </button>
+        </li>
+      {/each}
+    </ul>
+  {/if}
+</div>

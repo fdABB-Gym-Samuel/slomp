@@ -1,0 +1,657 @@
+openapi: 3.1.0
+info:
+  title: Songless Multiplayer API
+  version: 0.1.0
+  description: |
+    REST + WebSocket API for the multiplayer Songless variant.
+
+    ## Auth model
+    All non-auth endpoints require a session cookie (`session=<token>`).
+    The cookie is set by `POST /auth/login` and cleared by `POST /auth/logout`.
+
+    ## Gameplay model (Heardle-style)
+    Each round, every non-picker player progresses through guess brackets
+    independently. At bracket index `i`, the player can play up to
+    `guess_brackets_seconds[i]` seconds of audio. Each attempt the player
+    either:
+      - Guesses correctly → round ends for that player; they score
+        `len(brackets) - i` points (default scale: 6/5/4/3/2/1).
+      - Guesses incorrectly → bracket auto-advances by one.
+      - Skips → bracket auto-advances by one (no guess recorded).
+    A player is "exhausted" when they wrong-guess or skip past the last
+    bracket — they finish the round with 0 points. The round ends when every
+    non-picker has either guessed correctly or exhausted brackets, or when
+    a hard server-side timeout elapses.
+
+    ## Realtime (WebSocket: `/rooms/{code}/ws`)
+    Server → client events (`{ "type": ..., "payload": ... }`):
+      - `room_state`           — full snapshot, sent on connect / after any change
+      - `player_joined`        — `{ user }`
+      - `player_left`          — `{ user_id }`
+      - `player_disconnected`  — `{ user_id }`
+      - `settings_updated`     — `{ settings }`
+      - `phase_changed`        — `{ status, started_at? }`
+      - `song_submitted`       — `{ user_id, count }` (no track details — leaks answers)
+      - `round_started`        — `{ round_id, picker_ids, started_at_server,
+                                     audio_url, album_image_url?,
+                                     guess_brackets_seconds }`
+                                 (audio_url is the backend's proxied stream;
+                                 picker_ids is the set of users who picked
+                                 this song — they are excluded from guessing
+                                 and all receive picker_view events)
+      - `bracket_unlocked`     — `{ round_id, user_id, bracket_index }`
+                                 (peers see who's at which bracket; no answer leak)
+      - `player_finished`      — `{ round_id, user_id, outcome, points }`
+                                 outcome ∈ {correct, exhausted}
+      - `picker_view`          — sent only to the song's picker:
+                                 `{ round_id, attempts: [{ user_id, kind, guess_text?,
+                                     bracket_index, correct? }] }`
+                                 kind ∈ {guess, skip}
+      - `round_ended`          — `{ round_id, title, artist, album_image_url,
+                                     full_audio_url, scoreboard,
+                                     intermission_seconds, is_last_round }`
+                                 scoreboard entries include `previous_score`
+                                 so clients can animate rank changes;
+                                 `full_audio_url` points at the full-preview
+                                 endpoint so the intermission can play the song.
+      - `game_ended`           — `{ scoreboard, restart_unlocks_at }`
+      - `error`                — `{ code, message }`
+
+    Client → server events:
+      - `ping`                 — keepalive, echoed back as `pong`
+
+    All gameplay actions (guess, skip, settings, phase change) go through REST;
+    the WS is push-only from the client's perspective except for keepalive.
+
+servers:
+  - url: http://localhost:8000
+    description: Local dev
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: session
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+
+    User:
+      type: object
+      required: [id, username]
+      properties:
+        id: { type: string, format: uuid }
+        username: { type: string }
+
+    RoomStatus:
+      type: string
+      enum: [lobby, selecting, playing, results]
+
+    RoomSettings:
+      type: object
+      properties:
+        min_popularity:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Minimum Spotify popularity (0-100).
+        required_artists:
+          type: array
+          items: { type: string }
+          description: Spotify artist IDs. If non-empty, track must be by one of these.
+        songs_per_player:
+          type: integer
+          minimum: 1
+          maximum: 10
+        guess_brackets_seconds:
+          type: array
+          items: { type: number, minimum: 0 }
+          minItems: 1
+          description: |
+            Strictly-ascending elapsed-time markers (in seconds) at which the score
+            decreases. The last value is also the round's hard time limit.
+            Default: [0.5, 1, 2.5, 5, 15, 30].
+        album_art_enabled:
+          type: boolean
+          description: Show the song's album cover during the round.
+        album_art_unblur:
+          type: boolean
+          description: |
+            When enabled, the album cover is blurred at round start and progressively
+            unblurred as each guess bracket elapses. Has no effect if
+            `album_art_enabled` is false.
+        round_intermission_seconds:
+          type: integer
+          minimum: 0
+          maximum: 30
+          description: |
+            Pause between rounds during which the song is revealed and the
+            leaderboard movement is animated. 0 disables the intermission.
+        post_game_delay_seconds:
+          type: integer
+          minimum: 0
+          description: Cooldown after results before leader can restart.
+
+    RoomPlayer:
+      type: object
+      required: [user, score, connected, songs_submitted]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        score: { type: integer }
+        connected: { type: boolean }
+        songs_submitted:
+          {
+            type: integer,
+            description: Count only; titles withheld until reveal.,
+          }
+
+    Room:
+      type: object
+      required: [code, leader_id, status, settings, players]
+      properties:
+        code: { type: string }
+        leader_id: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/RoomStatus" }
+        settings: { $ref: "#/components/schemas/RoomSettings" }
+        players:
+          type: array
+          items: { $ref: "#/components/schemas/RoomPlayer" }
+        current_round_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    SongCandidate:
+      type: object
+      required: [spotify_track_id, title, artist]
+      properties:
+        spotify_track_id: { type: string }
+        title: { type: string }
+        artist: { type: string }
+        album: { type: string }
+        preview_url: { type: string, nullable: true }
+        album_image_url: { type: string, nullable: true }
+        duration_ms: { type: integer }
+        popularity: { type: integer }
+
+    SubmittedSong:
+      type: object
+      required: [id, spotify_track_id, title, artist]
+      properties:
+        id: { type: string, format: uuid }
+        spotify_track_id: { type: string }
+        title: { type: string }
+        artist: { type: string }
+        preview_url: { type: string, nullable: true }
+        album_image_url: { type: string, nullable: true }
+
+    GuessResult:
+      type: object
+      required: [correct, points]
+      properties:
+        correct: { type: boolean }
+        points: { type: integer }
+        bracket_seconds: { type: number, nullable: true }
+
+    ScoreboardEntry:
+      type: object
+      required: [user, score]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        score: { type: integer }
+        previous_score:
+          type: integer
+          description: |
+            Score before this round's points were applied. Only present in the
+            `round_ended` WS event so clients can animate rank changes.
+
+  responses:
+    Unauthorized:
+      description: Not logged in
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Authenticated but not allowed (e.g. not leader)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Room or resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Action conflicts with current room state
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+security:
+  - sessionCookie: []
+
+paths:
+  /auth/register:
+    post:
+      summary: Create a new user account
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string, minLength: 3, maxLength: 32 }
+                password: { type: string, minLength: 8 }
+      responses:
+        "201":
+          description: Created and logged in (sets session cookie)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "409":
+          description: Username taken
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /auth/login:
+    post:
+      summary: Log in
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string }
+      responses:
+        "200":
+          description: Logged in (sets session cookie)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/logout:
+    post:
+      summary: Log out (clears session cookie)
+      responses:
+        "204": { description: Logged out }
+
+  /me:
+    get:
+      summary: Current user
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /rooms:
+    post:
+      summary: Create a new room (caller becomes leader)
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Room" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /rooms/{code}:
+    parameters:
+      - { name: code, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Get room state
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Room" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /rooms/{code}/join:
+    parameters:
+      - { name: code, in: path, required: true, schema: { type: string } }
+    post:
+      summary: Join an existing room
+      responses:
+        "200":
+          description: Joined
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Room" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Room is no longer in lobby phase
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /rooms/{code}/leave:
+    parameters:
+      - { name: code, in: path, required: true, schema: { type: string } }
+    post:
+      summary: Leave a room
+      responses:
+        "204": { description: Left }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /rooms/{code}/settings:
+    parameters:
+      - { name: code, in: path, required: true, schema: { type: string } }
+    patch:
+      summary: Update room settings (leader only, lobby phase only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RoomSettings" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Room" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /rooms/{code}/phase:
+    parameters:
+      - { name: code, in: path, required: true, schema: { type: string } }
+    post:
+      summary: Advance the room to the next phase (leader only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target]
+              properties:
+                target: { $ref: "#/components/schemas/RoomStatus" }
+      responses:
+        "200":
+          description: Phase changed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Room" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: Illegal transition (e.g. starting game before all songs submitted)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /rooms/{code}/restart:
+    parameters:
+      - { name: code, in: path, required: true, schema: { type: string } }
+    post:
+      summary: Reset scores and songs, return to lobby (leader only, results phase only)
+      responses:
+        "200":
+          description: Restarted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Room" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /rooms/{code}/songs:
+    parameters:
+      - { name: code, in: path, required: true, schema: { type: string } }
+    get:
+      summary: My submitted songs for this room
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SubmittedSong" }
+    post:
+      summary: Submit a song. Server re-validates against room rules via Spotify.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [spotify_track_id]
+              properties:
+                spotify_track_id: { type: string }
+      responses:
+        "201":
+          description: Accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SubmittedSong" }
+        "409":
+          description: Already submitted, or quota reached
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: Track does not match room rules (popularity / genre / artist / no preview_url)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /rooms/{code}/songs/{song_id}:
+    parameters:
+      - { name: code, in: path, required: true, schema: { type: string } }
+      - {
+          name: song_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    delete:
+      summary: Remove one of my own songs (selection phase only)
+      responses:
+        "204": { description: Removed }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /rooms/{code}/guess:
+    parameters:
+      - { name: code, in: path, required: true, schema: { type: string } }
+    post:
+      summary: Submit a guess for the caller's current bracket
+      description: |
+        The player picks a track from a Deezer search and submits its id. The
+        backend resolves the track via Deezer and compares its normalized
+        title and artist against the round's stored values. Scoring uses the
+        player's server-tracked `bracket_index` at the moment the guess
+        arrives. A wrong guess auto-advances the player to the next bracket;
+        if they were already at the last bracket, they finish exhausted with
+        0 points.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [round_id, guessed_track_id]
+              properties:
+                round_id: { type: string, format: uuid }
+                guessed_track_id: { type: string }
+      responses:
+        "200":
+          description: Guess recorded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GuessResult" }
+        "409":
+          description: Round not active, you've already finished, or you are the picker
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /rooms/{code}/skip:
+    parameters:
+      - { name: code, in: path, required: true, schema: { type: string } }
+    post:
+      summary: Skip the current bracket without guessing
+      description: |
+        Advances the caller to the next bracket. If already at the last bracket,
+        the caller finishes the round exhausted with 0 points.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [round_id]
+              properties:
+                round_id: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Bracket advanced or player finished
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bracket_index: { type: integer }
+                  finished: { type: boolean }
+        "409":
+          description: Round not active, you've already finished, or you are the picker
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /rooms/{code}/rounds/{round_id}/audio:
+    parameters:
+      - { name: code, in: path, required: true, schema: { type: string } }
+      - {
+          name: round_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    get:
+      summary: Stream a slice of the round's audio (length determined by caller's bracket)
+      description: |
+        The endpoint takes no bracket parameter — it is read from the in-memory
+        round state for the caller, so a client cannot ask for more audio than
+        it has unlocked.
+
+        Server-side flow:
+          1. Look up the caller's `bracket_index` in the round state.
+          2. Resolve cached full-length audio from Valkey
+             (key: `audio:<spotify_track_id>`). On miss: fetch the preview
+             from Spotify's CDN, strip ID3 tags with `mutagen`, store the
+             cleaned bytes in Valkey, then continue.
+          3. Slice to `guess_brackets_seconds[bracket_index]` seconds with
+             pydub/ffmpeg and stream as `audio/mpeg`.
+
+        Served with `Cache-Control: no-store` so the slice doesn't persist
+        in any downstream/browser disk cache.
+      responses:
+        "200":
+          description: Audio slice
+          content:
+            audio/mpeg: {}
+        "403":
+          description: You're the picker, or you've already finished this round
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /rooms/{code}/rounds/{round_id}/full-audio:
+    parameters:
+      - { name: code, in: path, required: true, schema: { type: string } }
+      - {
+          name: round_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    get:
+      summary: Stream the full preview audio for a completed round
+      description: |
+        Served during the post-round intermission so all players (including
+        the picker and exhausted players) can hear the song. Refuses with
+        409 while the round is still in progress to avoid leaking the
+        answer.
+      responses:
+        "200":
+          description: Full preview audio
+          content:
+            audio/mpeg: {}
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Round has not ended yet
+
+  /rooms/{code}/results:
+    parameters:
+      - { name: code, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Final scoreboard (results phase)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ScoreboardEntry" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /spotify/search:
+    get:
+      summary: Search Spotify, optionally pre-filtered by a room's rules
+      description: |
+        Backend hits Spotify's `/search` with Client Credentials and filters
+        out tracks that don't match the room's settings (if `room_code` set).
+        Tracks without a `preview_url` are also filtered out, since they're
+        unplayable in the game.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string }
+        - name: room_code
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+      responses:
+        "200":
+          description: Matches
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SongCandidate" }
+
+  /rooms/{code}/ws:
+    parameters:
+      - { name: code, in: path, required: true, schema: { type: string } }
+    get:
+      summary: WebSocket upgrade for realtime room/game events
+      description: |
+        Documented here for discoverability. See `info.description` for the
+        message protocol. Authenticated via the same session cookie as REST.
+      responses:
+        "101": { description: Switching Protocols }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
