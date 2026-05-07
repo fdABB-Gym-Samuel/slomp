@@ -364,8 +364,9 @@ async def submit_song(
                     """
                     INSERT INTO room_songs
                         (room_id, spotify_track_id, title, title_normalized,
-                         artist, preview_url, album_image_url, duration_ms, popularity, play_order)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                         artist, album, preview_url, album_image_url,
+                         duration_ms, popularity, play_order)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     RETURNING id, spotify_track_id, title, artist, preview_url, album_image_url
                     """,
                     room["id"],
@@ -373,6 +374,7 @@ async def submit_song(
                     candidate["title"],
                     normalize_title(candidate["title"]),
                     candidate["artist"],
+                    candidate.get("album"),
                     candidate["preview_url"],
                     candidate["album_image_url"],
                     candidate["duration_ms"],

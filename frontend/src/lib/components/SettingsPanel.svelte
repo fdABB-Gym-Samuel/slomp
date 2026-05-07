@@ -110,6 +110,19 @@
     </label>
   </div>
 
+  <div>
+    <label class="label" for="hint-field">Hint field</label>
+    <select id="hint-field" class="input mt-1" bind:value={local.hint_field}>
+      <option value="none">None</option>
+      <option value="artist">Artist</option>
+      <option value="album">Album</option>
+    </select>
+    <p class="mt-1 text-xs text-text-muted">
+      Wrong guesses that share this field with the correct song are flagged
+      as a hint (shown in warning colour) but still advance the bracket.
+    </p>
+  </div>
+
   <div class="grid grid-cols-2 gap-4">
     <div>
       <label class="label" for="round-intermission">

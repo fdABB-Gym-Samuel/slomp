@@ -95,8 +95,8 @@ async def _start_next_round(code: str) -> None:
     async with db.pool().acquire() as conn:
         song = await conn.fetchrow(
             """
-            SELECT rs.id, rs.spotify_track_id, rs.title, rs.artist, rs.preview_url,
-                   rs.album_image_url, rs.room_id, r.settings
+            SELECT rs.id, rs.spotify_track_id, rs.title, rs.artist, rs.album,
+                   rs.preview_url, rs.album_image_url, rs.room_id, r.settings
             FROM room_songs rs
             JOIN rooms r ON r.id = rs.room_id
             WHERE rs.id = $1
@@ -136,12 +136,14 @@ async def _start_next_round(code: str) -> None:
         spotify_track_id=song["spotify_track_id"],
         title=song["title"],
         artist=song["artist"],
+        album=song["album"],
         preview_url=song["preview_url"] or "",
         album_image_url=song["album_image_url"],
         picker_ids=picker_ids,
         started_at=round_row["started_at"],
         brackets=brackets,
         players=players,
+        hint_field=settings.hint_field,
     )
 
     async with game.lock:
@@ -196,11 +198,14 @@ async def submit_guess(
     # players' guesses on the network round-trip.
     guess_title = "<unknown>"
     guess_artist = ""
+    guess_album: str | None = None
     try:
         guess_track = await spotify.get_track(guessed_track_id)
         guess_title = guess_track.get("title", "<unknown>")
         artist_obj = guess_track.get("artist") or {}
         guess_artist = artist_obj.get("name", "")
+        album_obj = guess_track.get("album") or {}
+        guess_album = album_obj.get("title")
     except Exception:
         # Treat unresolvable track as a wrong guess. Player still gets a
         # bracket-advance penalty.
@@ -242,6 +247,17 @@ async def submit_guess(
         correct = matching.is_correct_guess(
             active.title, active.artist, guess_title, guess_artist
         )
+        hint_fulfilled = (
+            False
+            if correct
+            else matching.is_hint_fulfilled(
+                active.hint_field,
+                active.artist,
+                active.album,
+                guess_artist,
+                guess_album,
+            )
+        )
 
         if correct:
             points = _score_for_bracket(bracket_index, active.brackets)
@@ -281,7 +297,14 @@ async def submit_guess(
                 )
 
         await _send_picker_attempt(
-            code, active, user_id, "guess", guess_label, correct, bracket_index
+            code,
+            active,
+            user_id,
+            "guess",
+            guess_label,
+            correct,
+            bracket_index,
+            hint_fulfilled,
         )
 
         result = {
@@ -289,6 +312,7 @@ async def submit_guess(
             "points": player.points if correct else 0,
             "bracket_index": player.bracket_index,
             "finished": player.finished,
+            "hint_fulfilled": hint_fulfilled,
         }
         all_done = active.all_finished()
 
@@ -360,7 +384,7 @@ async def submit_skip(code: str, user_id: UUID, round_id: UUID) -> dict:
             )
 
         await _send_picker_attempt(
-            code, active, user_id, "skip", None, None, prev_index
+            code, active, user_id, "skip", None, None, prev_index, False
         )
 
         result = {"bracket_index": player.bracket_index, "finished": player.finished}
@@ -437,6 +461,7 @@ async def _send_picker_attempt(
     guess_text: str | None,
     correct: bool | None,
     bracket_index: int,
+    hint_fulfilled: bool,
 ) -> None:
     payload = {
         "round_id": str(active.round_id),
@@ -447,6 +472,7 @@ async def _send_picker_attempt(
                 "guess_text": guess_text,
                 "correct": correct,
                 "bracket_index": bracket_index,
+                "hint_fulfilled": hint_fulfilled,
             }
         ],
     }
@@ -498,9 +524,15 @@ async def _end_round(code: str) -> None:
             return
         game.active_round = None
         game.completed_round_ids.append(active.round_id)
-        if game.timeout_task is not None:
+        # Don't cancel ourselves — _end_round can be called from inside the
+        # timeout watcher, in which case task.cancel() would interrupt the
+        # rest of this function at its next await.
+        if (
+            game.timeout_task is not None
+            and game.timeout_task is not asyncio.current_task()
+        ):
             game.timeout_task.cancel()
-            game.timeout_task = None
+        game.timeout_task = None
 
     # Per-guess score updates were applied live during submit_guess, so the
     # DB already has the post-round scores. Reconstruct the pre-round scores

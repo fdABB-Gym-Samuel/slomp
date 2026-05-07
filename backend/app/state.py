@@ -29,12 +29,14 @@ class ActiveRound:
     spotify_track_id: str
     title: str
     artist: str
+    album: str | None
     preview_url: str
     album_image_url: str | None
     picker_ids: set[UUID]
     started_at: datetime
     brackets: list[float]
     players: dict[UUID, PlayerRoundState]
+    hint_field: str = "none"
 
     def all_finished(self) -> bool:
         return all(p.finished for p in self.players.values())

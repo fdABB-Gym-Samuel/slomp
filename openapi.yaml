@@ -48,8 +48,10 @@ info:
                                  outcome ∈ {correct, exhausted}
       - `picker_view`          — sent only to the song's picker:
                                  `{ round_id, attempts: [{ user_id, kind, guess_text?,
-                                     bracket_index, correct? }] }`
-                                 kind ∈ {guess, skip}
+                                     bracket_index, correct?, hint_fulfilled }] }`
+                                 kind ∈ {guess, skip}; `hint_fulfilled` is true
+                                 when a wrong guess matched the room's
+                                 `hint_field`.
       - `round_ended`          — `{ round_id, title, artist, album_image_url,
                                      full_audio_url, scoreboard,
                                      intermission_seconds, is_last_round }`
@@ -129,6 +131,15 @@ components:
             When enabled, the album cover is blurred at round start and progressively
             unblurred as each guess bracket elapses. Has no effect if
             `album_art_enabled` is false.
+        hint_field:
+          type: string
+          enum: [none, artist, album]
+          description: |
+            Which field a wrong guess can match to count as a "hint" — the
+            backend reports `hint_fulfilled=true` on the GuessResult and in
+            `picker_view` when a wrong guess shares this field with the
+            correct song. Purely informational; bracket advancement and
+            scoring are unaffected. `none` disables hints.
         round_intermission_seconds:
           type: integer
           minimum: 0
@@ -208,7 +219,13 @@ components:
       properties:
         correct: { type: boolean }
         points: { type: integer }
-        bracket_seconds: { type: number, nullable: true }
+        bracket_index: { type: integer }
+        finished: { type: boolean }
+        hint_fulfilled:
+          type: boolean
+          description: |
+            True when the guess was wrong but matched the room's `hint_field`
+            (artist or album) of the correct song.
 
     ScoreboardEntry:
       type: object

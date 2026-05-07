@@ -39,3 +39,24 @@ def is_correct_guess(
     if normalize_title(round_title) != normalize_title(guess_title):
         return False
     return normalize_artist(round_artist) == normalize_artist(guess_artist)
+
+
+def is_hint_fulfilled(
+    field: str,
+    round_artist: str,
+    round_album: str | None,
+    guess_artist: str,
+    guess_album: str | None,
+) -> bool:
+    """Whether a wrong guess matches the configured hint field. `field` is
+    one of {"none", "artist", "album"}. Same normalization as `is_correct_guess`
+    so capitalisation/punctuation differences don't matter."""
+    if field == "artist":
+        if not (round_artist and guess_artist):
+            return False
+        return normalize_artist(round_artist) == normalize_artist(guess_artist)
+    if field == "album":
+        if not (round_album and guess_album):
+            return False
+        return normalize_artist(round_album) == normalize_artist(guess_album)
+    return False

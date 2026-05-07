@@ -7,18 +7,29 @@
 
   let { roomData }: { roomData: Room } = $props();
 
+  type LocalAttempt = {
+    kind: 'guess' | 'skip';
+    bracket_index: number;
+    guess_text: string | null;
+    correct: boolean | null;
+    hint_fulfilled: boolean;
+  };
+
   let query = $state('');
   let searchResults = $state<SongCandidate[]>([]);
   let searching = $state(false);
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
   let lastResult = $state<{ correct: boolean; points: number } | null>(null);
+  let myAttempts = $state<LocalAttempt[]>([]);
   let submitting = $state(false);
   let error = $state<string | null>(null);
 
   let audio: HTMLAudioElement | null = $state(null);
   let playing = $state(false);
-  let lastPlayedAt = $state<number | null>(null);
+  let playbackSec = $state(0);
+  let srcBracket: number | null = null;
+  let rafId: number | null = null;
   let now = $state(Date.now());
 
   const meId = $derived(auth.user?.id ?? '');
@@ -27,6 +38,13 @@
   const myBracket = $derived(room.bracketIndices[meId] ?? 0);
   const myFinished = $derived(room.finishedPlayers[meId] ?? null);
   const brackets = $derived(active?.guess_brackets_seconds ?? []);
+  const maxBracketSec = $derived(brackets[brackets.length - 1] || 1);
+  const currentBracketSec = $derived(
+    brackets[Math.min(myBracket, brackets.length - 1)] ?? 0
+  );
+  const fillPct = $derived(
+    Math.min(100, (playbackSec / maxBracketSec) * 100)
+  );
   const roundDeadline = $derived(
     active
       ? new Date(active.started_at_server).getTime() +
@@ -55,6 +73,24 @@
     if (items.length === 2) return `${items[0]} and ${items[1]}`;
     return `${items.slice(0, -1).join(', ')}, and ${items[items.length - 1]}`;
   }
+
+  function bracketPct(i: number): number {
+    if (brackets.length === 0) return 0;
+    const idx = Math.max(0, Math.min(i, brackets.length - 1));
+    return Math.min(100, Math.max(0, (brackets[idx] / maxBracketSec) * 100));
+  }
+
+  function pickerAttemptColor(a: {
+    kind: string;
+    correct: boolean | null;
+    hint_fulfilled: boolean;
+  }): string {
+    if (a.kind === 'skip') return 'text-text-muted';
+    if (a.correct) return 'text-success';
+    if (a.hint_fulfilled) return 'text-warning';
+    return 'text-danger';
+  }
+
   const blurAmount = $derived(
     roomData.settings.album_art_unblur && brackets.length > 0
       ? Math.max(0, 24 - 24 * (myBracket / Math.max(1, brackets.length - 1)))
@@ -67,8 +103,20 @@
     query = '';
     searchResults = [];
     lastResult = null;
-    lastPlayedAt = null;
+    myAttempts = [];
+    playbackSec = 0;
+    srcBracket = null;
+    if (audio && !audio.paused) audio.pause();
     playing = false;
+  });
+
+  $effect(() => {
+    // When the player's bracket changes, the previously-fetched audio slice
+    // is stale — discard it so the next play() refetches a longer slice.
+    myBracket;
+    if (audio && !audio.paused) audio.pause();
+    playbackSec = 0;
+    srcBracket = null;
   });
 
   $effect(() => {
@@ -79,22 +127,61 @@
     return () => clearInterval(id);
   });
 
-  async function play() {
+  function tickPlayback() {
+    if (audio) playbackSec = audio.currentTime;
+    rafId = requestAnimationFrame(tickPlayback);
+  }
+
+  function startTracking() {
+    if (rafId == null) rafId = requestAnimationFrame(tickPlayback);
+  }
+
+  function stopTracking() {
+    if (rafId != null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+  }
+
+  async function togglePlayback() {
     if (!audio || !active) return;
-    // Cache-bust so the browser refetches on every play (server slices fresh
-    // bytes based on our current bracket).
-    audio.src = `${active.audio_url}?t=${Date.now()}`;
+    if (playing) {
+      audio.pause();
+      return;
+    }
+    // Cache-bust so the server slices fresh bytes for the current bracket.
+    // Only refetch when the bracket changed since the last load, so a pause
+    // can be resumed without restarting. After a natural end, just rewind.
+    if (srcBracket !== myBracket) {
+      audio.src = `${active.audio_url}?t=${Date.now()}`;
+      srcBracket = myBracket;
+      playbackSec = 0;
+    } else if (audio.ended) {
+      audio.currentTime = 0;
+      playbackSec = 0;
+    }
     try {
       await audio.play();
-      playing = true;
-      lastPlayedAt = Date.now();
     } catch (e) {
       error = String(e);
     }
   }
 
+  function onAudioPlay() {
+    playing = true;
+    startTracking();
+  }
+
+  function onAudioPause() {
+    playing = false;
+    stopTracking();
+    if (audio) playbackSec = audio.currentTime;
+  }
+
   function onAudioEnded() {
     playing = false;
+    stopTracking();
+    if (audio) playbackSec = audio.currentTime;
   }
 
   function onQueryInput() {
@@ -126,6 +213,7 @@
     if (!active) return;
     submitting = true;
     error = null;
+    const priorBracket = myBracket;
     try {
       const r = await api.guess(
         roomData.code,
@@ -133,6 +221,16 @@
         track.spotify_track_id
       );
       lastResult = { correct: r.correct, points: r.points };
+      myAttempts = [
+        ...myAttempts,
+        {
+          kind: 'guess',
+          bracket_index: priorBracket,
+          guess_text: `${track.title} — ${track.artist}`,
+          correct: r.correct,
+          hint_fulfilled: r.hint_fulfilled,
+        },
+      ];
       query = '';
       searchResults = [];
     } catch (err) {
@@ -146,9 +244,20 @@
     if (!active) return;
     submitting = true;
     error = null;
+    const priorBracket = myBracket;
     try {
       await api.skip(roomData.code, active.round_id);
       lastResult = null;
+      myAttempts = [
+        ...myAttempts,
+        {
+          kind: 'skip',
+          bracket_index: priorBracket,
+          guess_text: null,
+          correct: null,
+          hint_fulfilled: false,
+        },
+      ];
     } catch (err) {
       error = err instanceof APIError ? err.message : String(err);
     } finally {
@@ -209,13 +318,15 @@
                       @ {brackets[a.bracket_index]}s
                     </span>
                   </span>
-                  <span>
+                  <span class={pickerAttemptColor(a)}>
                     {#if a.kind === 'skip'}
-                      <span class="text-text-muted">skipped</span>
+                      skipped
                     {:else if a.correct}
-                      <span class="text-success">{a.guess_text} ✓</span>
+                      {a.guess_text} ✓
+                    {:else if a.hint_fulfilled}
+                      {a.guess_text} (hint)
                     {:else}
-                      <span class="text-warning">{a.guess_text} ✗</span>
+                      {a.guess_text} ✗
                     {/if}
                   </span>
                 </li>
@@ -249,22 +360,67 @@
             />
           {/if}
 
-          <div class="flex w-full items-center justify-center gap-2">
-            {#each brackets as b, i}
-              <span
-                class="badge font-mono"
-                class:bg-accent={i === myBracket && !myFinished}
-                class:text-text-primary={i === myBracket && !myFinished}
-                class:bg-surface-raised={i !== myBracket || myFinished}
-                class:text-text-muted={i > myBracket || myFinished}
-                class:line-through={i < myBracket}
-              >
-                {b}s
-              </span>
-            {/each}
-          </div>
+          <!-- Past attempts: stacked vertically and centered between cover and bar -->
+          {#if myAttempts.length > 0}
+            <ul class="flex w-full flex-col items-center gap-1.5">
+              {#each myAttempts as a, i (i)}
+                <li
+                  class="w-full max-w-md truncate rounded-md px-4 py-2 text-center text-sm font-medium"
+                  class:bg-success={a.kind === 'guess' && a.correct}
+                  class:bg-warning={a.kind === 'guess' &&
+                    !a.correct &&
+                    a.hint_fulfilled}
+                  class:bg-danger={a.kind === 'guess' &&
+                    !a.correct &&
+                    !a.hint_fulfilled}
+                  class:bg-surface-raised={a.kind === 'skip'}
+                  class:text-text-muted={a.kind === 'skip'}
+                  class:text-bg={a.kind === 'guess'}
+                  title={a.kind === 'skip' ? 'Skipped' : (a.guess_text ?? '')}
+                >
+                  {a.kind === 'skip' ? 'Skipped' : a.guess_text}
+                </li>
+              {/each}
+            </ul>
+          {/if}
 
-          <audio bind:this={audio} onended={onAudioEnded}></audio>
+          {#if brackets.length > 0}
+            <div class="w-full px-2">
+              <!-- Single time label, anchored at the current bracket -->
+              <div class="relative mb-1 h-4">
+                <span
+                  class="absolute top-0 -translate-x-1/2 transform font-mono text-xs font-semibold text-text-primary"
+                  style="left: {bracketPct(myBracket)}%"
+                >
+                  {currentBracketSec}s
+                </span>
+              </div>
+
+              <!-- Progress bar with vertical separator lines at each bracket -->
+              <div
+                class="relative h-3 overflow-hidden rounded bg-surface-raised"
+              >
+                <div
+                  class="h-full bg-accent"
+                  style="width: {fillPct}%"
+                ></div>
+                {#each brackets as _b, i (i)}
+                  {@const pos = bracketPct(i)}
+                  <div
+                    class="absolute top-0 h-full w-px bg-border"
+                    style="left: {pos}%"
+                  ></div>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+          <audio
+            bind:this={audio}
+            onplay={onAudioPlay}
+            onpause={onAudioPause}
+            onended={onAudioEnded}
+          ></audio>
 
           {#if myFinished}
             {#if myFinished.outcome === 'correct'}
@@ -276,8 +432,36 @@
               <p class="text-warning">Out of brackets. 0 pts.</p>
             {/if}
           {:else}
-            <button class="btn-primary px-8" onclick={play} disabled={playing}>
-              {playing ? 'Playing…' : `Play ${brackets[myBracket]}s`}
+            <button
+              type="button"
+              class="btn-primary h-14 w-14 rounded-full p-0"
+              onclick={togglePlayback}
+              aria-label={playing ? 'Pause' : 'Play'}
+            >
+              {#if playing}
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  class="h-6 w-6"
+                  aria-hidden="true"
+                >
+                  <line x1="10" x2="10" y1="4" y2="20" />
+                  <line x1="14" x2="14" y1="4" y2="20" />
+                </svg>
+              {:else}
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="currentColor"
+                  class="h-6 w-6"
+                  aria-hidden="true"
+                >
+                  <polygon points="6 3 20 12 6 21 6 3" />
+                </svg>
+              {/if}
             </button>
           {/if}
         </div>

@@ -5,6 +5,8 @@ export interface User {
 
 export type RoomStatus = "lobby" | "selecting" | "playing" | "results";
 
+export type HintField = "none" | "artist" | "album";
+
 export interface RoomSettings {
   min_popularity: number;
   required_artists: string[];
@@ -12,6 +14,7 @@ export interface RoomSettings {
   guess_brackets_seconds: number[];
   album_art_enabled: boolean;
   album_art_unblur: boolean;
+  hint_field: HintField;
   round_intermission_seconds: number;
   round_max_seconds: number;
   post_game_delay_seconds: number;
@@ -58,6 +61,7 @@ export interface GuessResult {
   points: number;
   bracket_index: number;
   finished: boolean;
+  hint_fulfilled: boolean;
 }
 
 export interface SkipResult {
@@ -95,4 +99,5 @@ export interface PickerAttempt {
   guess_text: string | null;
   correct: boolean | null;
   bracket_index: number;
+  hint_fulfilled: boolean;
 }
