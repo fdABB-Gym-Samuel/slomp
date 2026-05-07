@@ -38,6 +38,7 @@ class RoomSettings(BaseModel):
     album_art_enabled: bool = True
     album_art_unblur: bool = True
     round_intermission_seconds: int = Field(default=6, ge=0, le=30)
+    round_max_seconds: int = Field(default=60, ge=10, le=600)
     post_game_delay_seconds: int = Field(default=15, ge=0)
 
 

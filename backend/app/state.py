@@ -50,6 +50,7 @@ class RoomGame:
     active_round: ActiveRound | None = None
     completed_round_ids: list[UUID] = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    timeout_task: asyncio.Task | None = None
 
 
 class GameRegistry:

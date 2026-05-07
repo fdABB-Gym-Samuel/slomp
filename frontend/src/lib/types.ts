@@ -13,6 +13,7 @@ export interface RoomSettings {
   album_art_enabled: boolean;
   album_art_unblur: boolean;
   round_intermission_seconds: number;
+  round_max_seconds: number;
   post_game_delay_seconds: number;
 }
 
@@ -85,6 +86,7 @@ export interface ActiveRoundInfo {
   audio_url: string;
   album_image_url: string | null;
   guess_brackets_seconds: number[];
+  round_max_seconds: number;
 }
 
 export interface PickerAttempt {

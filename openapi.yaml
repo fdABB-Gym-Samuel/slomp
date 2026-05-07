@@ -34,11 +34,14 @@ info:
       - `song_submitted`       — `{ user_id, count }` (no track details — leaks answers)
       - `round_started`        — `{ round_id, picker_ids, started_at_server,
                                      audio_url, album_image_url?,
-                                     guess_brackets_seconds }`
+                                     guess_brackets_seconds, round_max_seconds }`
                                  (audio_url is the backend's proxied stream;
                                  picker_ids is the set of users who picked
                                  this song — they are excluded from guessing
-                                 and all receive picker_view events)
+                                 and all receive picker_view events;
+                                 round_max_seconds is the hard timeout —
+                                 when it elapses any non-picker who hasn't
+                                 finished is forced to exhausted/0 pts)
       - `bracket_unlocked`     — `{ round_id, user_id, bracket_index }`
                                  (peers see who's at which bracket; no answer leak)
       - `player_finished`      — `{ round_id, user_id, outcome, points }`
@@ -133,6 +136,14 @@ components:
           description: |
             Pause between rounds during which the song is revealed and the
             leaderboard movement is animated. 0 disables the intermission.
+        round_max_seconds:
+          type: integer
+          minimum: 10
+          maximum: 600
+          description: |
+            Hard time limit for a round, measured from `started_at_server`.
+            When it expires, every non-picker who hasn't yet guessed correctly
+            is forced into outcome=`exhausted` (0 points) and the round ends.
         post_game_delay_seconds:
           type: integer
           minimum: 0

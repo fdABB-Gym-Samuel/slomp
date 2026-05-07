@@ -146,6 +146,11 @@ async def _start_next_round(code: str) -> None:
 
     async with game.lock:
         game.active_round = active
+        if game.timeout_task is not None:
+            game.timeout_task.cancel()
+        game.timeout_task = asyncio.create_task(
+            _round_timeout_watcher(code, active.round_id, settings.round_max_seconds)
+        )
 
     audio_url = f"/rooms/{code}/rounds/{active.round_id}/audio"
     await state.hub.broadcast(
@@ -161,6 +166,7 @@ async def _start_next_round(code: str) -> None:
                 if settings.album_art_enabled
                 else None,
                 "guess_brackets_seconds": brackets,
+                "round_max_seconds": settings.round_max_seconds,
             },
         },
     )
@@ -449,12 +455,53 @@ async def _send_picker_attempt(
         await state.hub.send_to(code, picker_id, message)
 
 
-async def _end_round(code: str) -> None:
-    game = await state.registry.get(code)
-    if game is None or game.active_round is None:
+async def _round_timeout_watcher(code: str, round_id: UUID, timeout: float) -> None:
+    """Wait `timeout` seconds; if the round identified by `round_id` is still
+    active, force any unfinished player to outcome=exhausted (0 pts) and end
+    the round. Cancelled when the round ends naturally."""
+    try:
+        await asyncio.sleep(timeout)
+    except asyncio.CancelledError:
         return
 
-    active = game.active_round
+    game = await state.registry.get(code)
+    if game is None:
+        return
+
+    finished_users: list[UUID] = []
+    async with game.lock:
+        active = game.active_round
+        if active is None or active.round_id != round_id:
+            return
+        for uid, p in active.players.items():
+            if not p.finished:
+                p.outcome = "exhausted"
+                p.points = 0
+                finished_users.append(uid)
+
+    for uid in finished_users:
+        await _broadcast_player_finished(code, active, uid, "exhausted", 0)
+    await _end_round(code)
+
+
+async def _end_round(code: str) -> None:
+    game = await state.registry.get(code)
+    if game is None:
+        return
+
+    # Claim the active round under the lock so concurrent callers (e.g. the
+    # last guess and the timeout watcher firing at nearly the same instant)
+    # don't both broadcast round_ended.
+    async with game.lock:
+        active = game.active_round
+        if active is None:
+            return
+        game.active_round = None
+        game.completed_round_ids.append(active.round_id)
+        if game.timeout_task is not None:
+            game.timeout_task.cancel()
+            game.timeout_task = None
+
     # Per-guess score updates were applied live during submit_guess, so the
     # DB already has the post-round scores. Reconstruct the pre-round scores
     # from each player's in-memory round delta so the client can animate the
@@ -514,10 +561,6 @@ async def _end_round(code: str) -> None:
             },
         },
     )
-
-    async with game.lock:
-        game.completed_round_ids.append(active.round_id)
-        game.active_round = None
 
     if is_last_round:
         await _end_game(code)
@@ -591,4 +634,7 @@ async def restart_game(code: str) -> None:
                 "WHERE id = $1",
                 room["id"],
             )
+    existing = await state.registry.get(code)
+    if existing is not None and existing.timeout_task is not None:
+        existing.timeout_task.cancel()
     await state.registry.remove(code)

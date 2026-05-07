@@ -110,21 +110,37 @@
     </label>
   </div>
 
-  <div>
-    <label class="label" for="round-intermission">
-      Round intermission (seconds)
-    </label>
-    <input
-      id="round-intermission"
-      type="number"
-      min="0"
-      max="30"
-      class="input mt-1"
-      bind:value={local.round_intermission_seconds}
-    />
-    <p class="mt-1 text-xs text-text-muted">
-      Pause between rounds to reveal the song and show leaderboard movement.
-    </p>
+  <div class="grid grid-cols-2 gap-4">
+    <div>
+      <label class="label" for="round-intermission">
+        Round intermission (seconds)
+      </label>
+      <input
+        id="round-intermission"
+        type="number"
+        min="0"
+        max="30"
+        class="input mt-1"
+        bind:value={local.round_intermission_seconds}
+      />
+      <p class="mt-1 text-xs text-text-muted">
+        Pause between rounds to reveal the song and show leaderboard movement.
+      </p>
+    </div>
+    <div>
+      <label class="label" for="round-max">Round time limit (seconds)</label>
+      <input
+        id="round-max"
+        type="number"
+        min="10"
+        max="600"
+        class="input mt-1"
+        bind:value={local.round_max_seconds}
+      />
+      <p class="mt-1 text-xs text-text-muted">
+        When this elapses, anyone still guessing is auto-exhausted with 0 pts.
+      </p>
+    </div>
   </div>
 
   {#if error}

@@ -19,6 +19,7 @@
   let audio: HTMLAudioElement | null = $state(null);
   let playing = $state(false);
   let lastPlayedAt = $state<number | null>(null);
+  let now = $state(Date.now());
 
   const meId = $derived(auth.user?.id ?? '');
   const active = $derived(room.activeRound);
@@ -26,6 +27,17 @@
   const myBracket = $derived(room.bracketIndices[meId] ?? 0);
   const myFinished = $derived(room.finishedPlayers[meId] ?? null);
   const brackets = $derived(active?.guess_brackets_seconds ?? []);
+  const roundDeadline = $derived(
+    active
+      ? new Date(active.started_at_server).getTime() +
+          active.round_max_seconds * 1000
+      : null
+  );
+  const secondsLeft = $derived(
+    roundDeadline !== null
+      ? Math.max(0, Math.ceil((roundDeadline - now) / 1000))
+      : null
+  );
   const pickerNames = $derived(
     active
       ? active.picker_ids.map(
@@ -57,6 +69,14 @@
     lastResult = null;
     lastPlayedAt = null;
     playing = false;
+  });
+
+  $effect(() => {
+    if (!active) return;
+    const id = setInterval(() => {
+      now = Date.now();
+    }, 250);
+    return () => clearInterval(id);
   });
 
   async function play() {
@@ -151,6 +171,16 @@
         <div class="card text-center">
           <p class="text-sm text-text-muted">Your song is up</p>
           <h2 class="mt-2 text-xl font-semibold">Watching the others guess</h2>
+          {#if secondsLeft !== null}
+            <p
+              class="mt-2 font-mono text-sm"
+              class:text-text-muted={secondsLeft > 10}
+              class:text-warning={secondsLeft <= 10 && secondsLeft > 3}
+              class:text-danger={secondsLeft <= 3}
+            >
+              {secondsLeft}s left
+            </p>
+          {/if}
           {#if active.album_image_url}
             <img
               src={active.album_image_url}
@@ -198,6 +228,17 @@
           <p class="text-sm text-text-muted">
             Picked by <span class="text-text-primary">{pickerLabel}</span>
           </p>
+
+          {#if secondsLeft !== null}
+            <p
+              class="font-mono text-sm"
+              class:text-text-muted={secondsLeft > 10}
+              class:text-warning={secondsLeft <= 10 && secondsLeft > 3}
+              class:text-danger={secondsLeft <= 3}
+            >
+              {secondsLeft}s left
+            </p>
+          {/if}
 
           {#if active.album_image_url}
             <img
