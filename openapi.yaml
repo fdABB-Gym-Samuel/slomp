@@ -29,6 +29,9 @@ info:
       - `player_joined`        — `{ user }`
       - `player_left`          — `{ user_id }`
       - `player_disconnected`  — `{ user_id }`
+      - `player_kicked`        — `{ user_id }` (leader removed someone; the
+                                  kicked user's own client closes the WS)
+      - `leader_changed`       — `{ leader_id }`
       - `settings_updated`     — `{ settings }`
       - `phase_changed`        — `{ status, started_at? }`
       - `song_submitted`       — `{ user_id, count }` (no track details — leaks answers)
@@ -245,6 +248,11 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    BadRequest:
+      description: Malformed request
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     Forbidden:
       description: Authenticated but not allowed (e.g. not leader)
       content:
@@ -427,6 +435,46 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+
+  /rooms/{code}/players/{target_user_id}/promote:
+    parameters:
+      - { name: code, in: path, required: true, schema: { type: string } }
+      - {
+          name: target_user_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    post:
+      summary: Transfer leader role to another player (leader only, lobby phase only)
+      responses:
+        "200":
+          description: Leader changed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Room" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /rooms/{code}/players/{target_user_id}:
+    parameters:
+      - { name: code, in: path, required: true, schema: { type: string } }
+      - {
+          name: target_user_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    delete:
+      summary: Kick a player from the room (leader only, lobby phase only)
+      responses:
+        "204": { description: Player removed }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   /rooms/{code}/restart:
     parameters:

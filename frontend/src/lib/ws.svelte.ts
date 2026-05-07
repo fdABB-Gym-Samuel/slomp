@@ -1,4 +1,5 @@
 import { api } from "./api";
+import { auth } from "./auth.svelte";
 import type {
   ActiveRoundInfo,
   PickerAttempt,
@@ -19,6 +20,7 @@ class RoomConnection {
     Record<string, { outcome: "correct" | "exhausted"; points: number }>
   >({});
   pickerAttempts = $state<PickerAttempt[]>([]);
+  kickedSelf = $state(false);
   lastRoundResult = $state<{
     title: string;
     artist: string;
@@ -103,6 +105,7 @@ class RoomConnection {
     this.bracketIndices = {};
     this.finishedPlayers = {};
     this.pickerAttempts = [];
+    this.kickedSelf = false;
     this.lastRoundResult = null;
     this.finalScoreboard = null;
   }
@@ -127,6 +130,19 @@ class RoomConnection {
       case "player_left":
       case "player_disconnected":
         this._refetchRoom();
+        break;
+
+      case "player_kicked":
+        if (auth.user && ev.payload.user_id === auth.user.id) {
+          this.disconnect();
+          this.kickedSelf = true;
+        } else {
+          this._refetchRoom();
+        }
+        break;
+
+      case "leader_changed":
+        if (this.room) this.room.leader_id = ev.payload.leader_id;
         break;
 
       case "settings_updated":

@@ -7,12 +7,18 @@
     songsPerPlayer,
     showSubmissions = false,
     highlightUserId = null,
+    showLeaderActions = false,
+    onPromote,
+    onKick,
   }: {
     players: RoomPlayer[];
     leaderId: string;
     songsPerPlayer?: number;
     showSubmissions?: boolean;
     highlightUserId?: string | null;
+    showLeaderActions?: boolean;
+    onPromote?: (userId: string, username: string) => void;
+    onKick?: (userId: string, username: string) => void;
   } = $props();
 </script>
 
@@ -41,6 +47,28 @@
           </span>
         {:else}
           <span>{p.score} pts</span>
+        {/if}
+        {#if showLeaderActions && p.user.id !== leaderId}
+          {#if onPromote}
+            <button
+              type="button"
+              class="btn-ghost text-xs"
+              title="Make leader"
+              onclick={() => onPromote?.(p.user.id, p.user.username)}
+            >
+              Promote
+            </button>
+          {/if}
+          {#if onKick}
+            <button
+              type="button"
+              class="btn-ghost text-xs text-danger"
+              title="Kick from room"
+              onclick={() => onKick?.(p.user.id, p.user.username)}
+            >
+              Kick
+            </button>
+          {/if}
         {/if}
       </div>
     </li>

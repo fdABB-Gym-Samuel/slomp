@@ -3,7 +3,10 @@
   import type { Room, RoomSettings } from '$lib/types';
   import ArtistMultiSelect from './ArtistMultiSelect.svelte';
 
-  let { roomData }: { roomData: Room } = $props();
+  let {
+    roomData,
+    readonly = false,
+  }: { roomData: Room; readonly?: boolean } = $props();
 
   let local = $state<RoomSettings | null>(null);
   let bracketsText = $state('');
@@ -52,116 +55,155 @@
 </script>
 
 {#if local}
-<div class="card space-y-4">
-  <h2 class="text-lg font-semibold">Settings</h2>
-
-  <div class="grid grid-cols-2 gap-4">
-    <div>
-      <label class="label" for="songs-per-player">Songs per player</label>
-      <input
-        id="songs-per-player"
-        type="number"
-        min="1"
-        max="10"
-        class="input mt-1"
-        bind:value={local.songs_per_player}
-      />
-    </div>
-    <div>
-      <label class="label" for="min-popularity">Min popularity (0–100)</label>
-      <input
-        id="min-popularity"
-        type="number"
-        min="0"
-        max="100"
-        class="input mt-1"
-        bind:value={local.min_popularity}
-      />
-    </div>
-  </div>
-
-  <div>
-    <label class="label" for="brackets">Guess brackets (seconds)</label>
-    <input
-      id="brackets"
-      class="input mt-1 font-mono"
-      bind:value={bracketsText}
-      placeholder="0.5, 1, 2.5, 5, 15, 30"
-    />
-    <p class="mt-1 text-xs text-text-muted">
-      Strictly ascending. Last value caps the round time.
+<div class="card space-y-6">
+  <section class="space-y-4">
+    <h3 class="text-base font-semibold text-text-primary">Song pool</h3>
+    <p class="text-xs text-text-muted">
+      Controls which songs each player can submit during the picking phase.
     </p>
-  </div>
 
-  <ArtistMultiSelect bind:selected={local.required_artists} />
+    <div class="grid grid-cols-2 gap-4">
+      <div>
+        <label class="label" for="songs-per-player">Songs per player</label>
+        <input
+          id="songs-per-player"
+          type="number"
+          min="1"
+          max="10"
+          class="input mt-1"
+          bind:value={local.songs_per_player}
+          disabled={readonly}
+        />
+      </div>
+      <div>
+        <label class="label" for="min-popularity">Min popularity (0–100)</label>
+        <input
+          id="min-popularity"
+          type="number"
+          min="0"
+          max="100"
+          class="input mt-1"
+          bind:value={local.min_popularity}
+          disabled={readonly}
+        />
+      </div>
+    </div>
 
-  <div class="flex gap-4">
-    <label class="flex items-center gap-2 text-sm">
-      <input type="checkbox" bind:checked={local.album_art_enabled} />
-      Show album art
-    </label>
-    <label class="flex items-center gap-2 text-sm">
-      <input
-        type="checkbox"
-        bind:checked={local.album_art_unblur}
-        disabled={!local.album_art_enabled}
-      />
-      Gradual unblur
-    </label>
-  </div>
+    <ArtistMultiSelect bind:selected={local.required_artists} {readonly} />
+  </section>
 
-  <div>
-    <label class="label" for="hint-field">Hint field</label>
-    <select id="hint-field" class="input mt-1" bind:value={local.hint_field}>
-      <option value="none">None</option>
-      <option value="artist">Artist</option>
-      <option value="album">Album</option>
-    </select>
-    <p class="mt-1 text-xs text-text-muted">
-      Wrong guesses that share this field with the correct song are flagged
-      as a hint (shown in warning colour) but still advance the bracket.
+  <hr class="border-border" />
+
+  <section class="space-y-4">
+    <h3 class="text-base font-semibold text-text-primary">Round mechanics</h3>
+    <p class="text-xs text-text-muted">
+      How guesses are scored and what info is revealed during a round.
     </p>
-  </div>
 
-  <div class="grid grid-cols-2 gap-4">
     <div>
-      <label class="label" for="round-intermission">
-        Round intermission (seconds)
+      <label class="label" for="brackets">Guess brackets (seconds)</label>
+      <input
+        id="brackets"
+        class="input mt-1 font-mono"
+        bind:value={bracketsText}
+        placeholder="0.5, 1, 2.5, 5, 15, 30"
+        disabled={readonly}
+      />
+      <p class="mt-1 text-xs text-text-muted">
+        Strictly ascending. Last value caps the round time.
+      </p>
+    </div>
+
+    <div class="flex gap-4">
+      <label class="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          bind:checked={local.album_art_enabled}
+          disabled={readonly}
+        />
+        Show album art
       </label>
-      <input
-        id="round-intermission"
-        type="number"
-        min="0"
-        max="30"
-        class="input mt-1"
-        bind:value={local.round_intermission_seconds}
-      />
-      <p class="mt-1 text-xs text-text-muted">
-        Pause between rounds to reveal the song and show leaderboard movement.
-      </p>
+      <label class="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          bind:checked={local.album_art_unblur}
+          disabled={readonly || !local.album_art_enabled}
+        />
+        Gradual unblur
+      </label>
     </div>
+
     <div>
-      <label class="label" for="round-max">Round time limit (seconds)</label>
-      <input
-        id="round-max"
-        type="number"
-        min="10"
-        max="600"
+      <label class="label" for="hint-field">Hint field</label>
+      <select
+        id="hint-field"
         class="input mt-1"
-        bind:value={local.round_max_seconds}
-      />
+        bind:value={local.hint_field}
+        disabled={readonly}
+      >
+        <option value="none">None</option>
+        <option value="artist">Artist</option>
+        <option value="album">Album</option>
+      </select>
       <p class="mt-1 text-xs text-text-muted">
-        When this elapses, anyone still guessing is auto-exhausted with 0 pts.
+        Wrong guesses that share this field with the correct song are flagged
+        as a hint (shown in warning colour) but still advance the bracket.
       </p>
     </div>
-  </div>
+  </section>
 
-  {#if error}
-    <p class="text-sm text-danger">{error}</p>
+  <hr class="border-border" />
+
+  <section class="space-y-4">
+    <h3 class="text-base font-semibold text-text-primary">Pacing</h3>
+    <p class="text-xs text-text-muted">
+      How long rounds run and how much breathing room there is between them.
+    </p>
+
+    <div class="grid grid-cols-2 gap-4">
+      <div>
+        <label class="label" for="round-intermission">
+          Round intermission (seconds)
+        </label>
+        <input
+          id="round-intermission"
+          type="number"
+          min="0"
+          max="30"
+          class="input mt-1"
+          bind:value={local.round_intermission_seconds}
+          disabled={readonly}
+        />
+        <p class="mt-1 text-xs text-text-muted">
+          Pause between rounds to reveal the song and show leaderboard movement.
+        </p>
+      </div>
+      <div>
+        <label class="label" for="round-max">Round time limit (seconds)</label>
+        <input
+          id="round-max"
+          type="number"
+          min="10"
+          max="600"
+          class="input mt-1"
+          bind:value={local.round_max_seconds}
+          disabled={readonly}
+        />
+        <p class="mt-1 text-xs text-text-muted">
+          When this elapses, anyone still guessing is auto-exhausted with 0 pts.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  {#if !readonly}
+    {#if error}
+      <p class="text-sm text-danger">{error}</p>
+    {/if}
+
+    <button class="btn-primary w-full" disabled={saving} onclick={save}>
+      {saving ? 'Saving…' : 'Save settings'}
+    </button>
   {/if}
-
-  <button class="btn-primary w-full" disabled={saving} onclick={save}>
-    {saving ? 'Saving…' : 'Save settings'}
-  </button>
 </div>
 {/if}

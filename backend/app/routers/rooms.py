@@ -257,6 +257,93 @@ async def change_phase(
     return out
 
 
+@router.post("/{code}/players/{target_user_id}/promote", response_model=RoomOut)
+async def promote_player(
+    code: str,
+    target_user_id: UUID,
+    user_id: UUID = Depends(auth.get_current_user_id),
+) -> RoomOut:
+    async with db.pool().acquire() as conn:
+        async with conn.transaction():
+            room = await load_room_or_404(conn, code)
+            await assert_leader(room, user_id)
+            await assert_status(room, "lobby")
+            if target_user_id == user_id:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "already_leader",
+                        "message": "you are already the leader",
+                    },
+                )
+            is_member = await conn.fetchval(
+                "SELECT 1 FROM room_players WHERE room_id = $1 AND user_id = $2",
+                room["id"],
+                target_user_id,
+            )
+            if not is_member:
+                raise HTTPException(
+                    status.HTTP_404_NOT_FOUND,
+                    detail={
+                        "code": "player_not_in_room",
+                        "message": "target user is not in this room",
+                    },
+                )
+            await conn.execute(
+                "UPDATE rooms SET leader_id = $1 WHERE id = $2",
+                target_user_id,
+                room["id"],
+            )
+            room = await load_room_or_404(conn, code)
+            out = await build_room_out(conn, room)
+
+    await state.hub.broadcast(
+        code,
+        {"type": "leader_changed", "payload": {"leader_id": str(target_user_id)}},
+    )
+    return out
+
+
+@router.delete("/{code}/players/{target_user_id}", status_code=204)
+async def kick_player(
+    code: str,
+    target_user_id: UUID,
+    user_id: UUID = Depends(auth.get_current_user_id),
+) -> Response:
+    async with db.pool().acquire() as conn:
+        async with conn.transaction():
+            room = await load_room_or_404(conn, code)
+            await assert_leader(room, user_id)
+            await assert_status(room, "lobby")
+            if target_user_id == user_id:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "cannot_kick_self",
+                        "message": "use leave instead of kicking yourself",
+                    },
+                )
+            deleted = await conn.execute(
+                "DELETE FROM room_players WHERE room_id = $1 AND user_id = $2",
+                room["id"],
+                target_user_id,
+            )
+            if deleted == "DELETE 0":
+                raise HTTPException(
+                    status.HTTP_404_NOT_FOUND,
+                    detail={
+                        "code": "player_not_in_room",
+                        "message": "target user is not in this room",
+                    },
+                )
+
+    await state.hub.broadcast(
+        code,
+        {"type": "player_kicked", "payload": {"user_id": str(target_user_id)}},
+    )
+    return Response(status_code=204)
+
+
 @router.post("/{code}/restart", response_model=RoomOut)
 async def restart_room(
     code: str, user_id: UUID = Depends(auth.get_current_user_id)

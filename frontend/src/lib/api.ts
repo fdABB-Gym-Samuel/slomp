@@ -93,6 +93,12 @@ export const api = {
     }),
   restart: (code: string) =>
     request<Room>(`/rooms/${code}/restart`, { method: "POST" }),
+  promotePlayer: (code: string, userId: string) =>
+    request<Room>(`/rooms/${code}/players/${userId}/promote`, {
+      method: "POST",
+    }),
+  kickPlayer: (code: string, userId: string) =>
+    request<void>(`/rooms/${code}/players/${userId}`, { method: "DELETE" }),
 
   mySongs: (code: string) => request<SubmittedSong[]>(`/rooms/${code}/songs`),
   submitSong: (code: string, spotifyTrackId: string) =>

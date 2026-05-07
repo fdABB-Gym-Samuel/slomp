@@ -4,8 +4,10 @@
 
   let {
     selected = $bindable(),
+    readonly = false,
   }: {
     selected: string[];
+    readonly?: boolean;
   } = $props();
 
   let query = $state('');
@@ -62,21 +64,33 @@
     <div class="mb-2 flex flex-wrap gap-2">
       {#each selected as id (id)}
         {@const a = cache[id]}
-        <button
-          type="button"
-          class="badge bg-accent/20 text-accent hover:bg-accent/30 inline-flex items-center gap-1"
-          onclick={() => remove(id)}
-        >
-          {#if a?.image_url}
-            <img src={a.image_url} alt="" class="h-4 w-4 rounded-full" />
-          {/if}
-          {a?.name ?? id.slice(0, 8)}
-          <span class="ml-1 text-xs">×</span>
-        </button>
+        {#if readonly}
+          <span class="badge bg-accent/20 text-accent inline-flex items-center gap-1">
+            {#if a?.image_url}
+              <img src={a.image_url} alt="" class="h-4 w-4 rounded-full" />
+            {/if}
+            {a?.name ?? id.slice(0, 8)}
+          </span>
+        {:else}
+          <button
+            type="button"
+            class="badge bg-accent/20 text-accent hover:bg-accent/30 inline-flex items-center gap-1"
+            onclick={() => remove(id)}
+          >
+            {#if a?.image_url}
+              <img src={a.image_url} alt="" class="h-4 w-4 rounded-full" />
+            {/if}
+            {a?.name ?? id.slice(0, 8)}
+            <span class="ml-1 text-xs">×</span>
+          </button>
+        {/if}
       {/each}
     </div>
+  {:else if readonly}
+    <p class="text-sm text-text-muted">Any artist allowed.</p>
   {/if}
 
+  {#if !readonly}
   <input
     class="input text-sm"
     placeholder="search Spotify for an artist…"
@@ -123,5 +137,6 @@
         </li>
       {/each}
     </ul>
+  {/if}
   {/if}
 </div>
