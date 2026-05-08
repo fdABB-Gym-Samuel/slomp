@@ -345,6 +345,22 @@ async def update_settings(
     return out
 
 
+_CLASSIC_TRANSITIONS = {
+    "lobby": {"selecting"},
+    "selecting": {"playing", "lobby"},
+    "playing": {"results"},
+    "results": {"lobby"},
+}
+
+# Random mode skips the selecting phase entirely — the leader hits "Start"
+# from the lobby and the server fills the queue with chart picks.
+_RANDOM_TRANSITIONS = {
+    "lobby": {"playing"},
+    "playing": {"results"},
+    "results": {"lobby"},
+}
+
+
 @router.post("/{room_id}/phase", response_model=RoomOut)
 async def change_phase(
     room_id: UUID,
@@ -354,23 +370,78 @@ async def change_phase(
     target = req.target
 
     async with db.pool().acquire() as conn:
+        room = await load_room_or_404(conn, room_id)
+        await assert_leader(room, user_id)
+
+    settings = RoomSettings.model_validate(
+        room["settings"]
+        if isinstance(room["settings"], dict)
+        else json.loads(room["settings"])
+    )
+    is_random = settings.game_mode == "random"
+    transitions = _RANDOM_TRANSITIONS if is_random else _CLASSIC_TRANSITIONS
+    if target not in transitions.get(room["status"], set()):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "illegal_transition",
+                "message": f"cannot transition {room['status']} -> {target}",
+            },
+        )
+
+    # In random mode, fetch the song pool from Deezer up-front (outside any
+    # DB transaction) so a Deezer outage leaves the room in lobby with a
+    # clean error rather than stranding it in `playing` with no songs.
+    random_tracks: list[dict] = []
+    if is_random and target == "playing":
+        async with db.pool().acquire() as conn:
+            active_count = await conn.fetchval(
+                "SELECT count(*) FROM room_players "
+                "WHERE room_id = $1 AND spectating = FALSE",
+                room["id"],
+            )
+        if active_count < 1:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "not_enough_players",
+                    "message": "need at least 1 active player to start",
+                },
+            )
+        try:
+            random_tracks = await deezer.fetch_random_tracks(
+                settings.min_popularity, settings.random_song_count
+            )
+        except Exception:
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "code": "music_upstream_error",
+                    "message": "could not fetch tracks from Deezer",
+                },
+            )
+        if not random_tracks:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "code": "no_tracks_match",
+                    "message": (
+                        "no tracks matched the popularity threshold; "
+                        "lower min_popularity and try again"
+                    ),
+                },
+            )
+
+    async with db.pool().acquire() as conn:
         async with conn.transaction():
             room = await load_room_or_404(conn, room_id)
             await assert_leader(room, user_id)
-
-            current = room["status"]
-            valid_transitions = {
-                "lobby": {"selecting"},
-                "selecting": {"playing", "lobby"},
-                "playing": {"results"},
-                "results": {"lobby"},
-            }
-            if target not in valid_transitions.get(current, set()):
+            if target not in transitions.get(room["status"], set()):
                 raise HTTPException(
                     status.HTTP_409_CONFLICT,
                     detail={
                         "code": "illegal_transition",
-                        "message": f"cannot transition {current} -> {target}",
+                        "message": f"cannot transition {room['status']} -> {target}",
                     },
                 )
 
@@ -391,7 +462,7 @@ async def change_phase(
                         },
                     )
 
-            if target == "playing":
+            if target == "playing" and not is_random:
                 # Verify every active (non-spectator) player has submitted
                 # exactly songs_per_player tracks. Spectators sit out the
                 # current game entirely, so they don't count toward the
@@ -409,11 +480,6 @@ async def change_phase(
                             "message": "need at least 2 active players to start",
                         },
                     )
-                settings = RoomSettings.model_validate(
-                    room["settings"]
-                    if isinstance(room["settings"], dict)
-                    else json.loads(room["settings"])
-                )
                 shortfall = await conn.fetchrow(
                     """
                     SELECT rp.user_id, u.username, count(rsp.song_id)::int AS submitted
@@ -439,6 +505,36 @@ async def change_phase(
                                 f"{shortfall['submitted']} songs (need {settings.songs_per_player})"
                             ),
                         },
+                    )
+
+            if target == "playing" and is_random:
+                # Wipe stale songs from any prior game (restart_game also
+                # clears these, but a leader could have toggled game_mode
+                # mid-lobby) and seed the queue with the fetched pool.
+                await conn.execute(
+                    "DELETE FROM room_songs WHERE room_id = $1", room["id"]
+                )
+                for i, track in enumerate(random_tracks):
+                    cand = deezer.serialize_candidate(track)
+                    await conn.execute(
+                        """
+                        INSERT INTO room_songs
+                            (room_id, spotify_track_id, title, title_normalized,
+                             artist, album, preview_url, album_image_url,
+                             duration_ms, popularity, play_order)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                        """,
+                        room["id"],
+                        cand["spotify_track_id"],
+                        cand["title"],
+                        normalize_title(cand["title"]),
+                        cand["artist"],
+                        cand.get("album"),
+                        cand["preview_url"],
+                        cand["album_image_url"],
+                        cand["duration_ms"],
+                        cand["popularity"],
+                        i,
                     )
 
             await conn.execute(

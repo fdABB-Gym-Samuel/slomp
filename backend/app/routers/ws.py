@@ -89,6 +89,106 @@ async def _auto_leave_if_stale(room_id: UUID, user_id: UUID) -> None:
     await broadcast_public_room_change(room_id)
 
 
+async def _replay_active_round(websocket: WebSocket, key: str, user_id: UUID) -> None:
+    """Re-emit whatever round-scoped events a mid-round reconnect needs to
+    rebuild the UI: either the live round in progress, or the post-round
+    intermission scoreboard if we're between rounds. Mirrors the live
+    broadcast shapes in `game._start_next_round`, `submit_guess`,
+    `submit_skip`, `_send_picker_attempt`, and `_end_round`."""
+    game = await state.registry.get(key)
+    if game is None:
+        return
+
+    # Between rounds: the active round has ended but the next one hasn't
+    # started yet (server is sleeping the intermission). Replay round_ended
+    # with the remaining intermission time so the client shows the same
+    # scoreboard reveal it would have seen had it stayed connected.
+    if game.active_round is None:
+        if game.last_round_payload is None or game.intermission_ends_at is None:
+            return
+        remaining = max(
+            0.0, game.intermission_ends_at - asyncio.get_running_loop().time()
+        )
+        payload = dict(game.last_round_payload)
+        payload["intermission_seconds"] = remaining
+        await websocket.send_json({"type": "round_ended", "payload": payload})
+        return
+
+    active = game.active_round
+
+    audio_url = f"/rooms/{key}/rounds/{active.round_id}/audio"
+    cover_url = f"/rooms/{key}/rounds/{active.round_id}/cover"
+    await websocket.send_json(
+        {
+            "type": "round_started",
+            "payload": {
+                "round_id": str(active.round_id),
+                "picker_ids": [str(pid) for pid in active.picker_ids],
+                "started_at_server": active.started_at.isoformat(),
+                "audio_url": audio_url,
+                "album_image_url": cover_url
+                if active.album_art_enabled and active.album_image_url
+                else None,
+                "guess_brackets_seconds": active.brackets,
+                "round_max_seconds": active.round_max_seconds,
+            },
+        }
+    )
+
+    for uid, pstate in active.players.items():
+        if pstate.bracket_index > 0 and not pstate.finished:
+            await websocket.send_json(
+                {
+                    "type": "bracket_unlocked",
+                    "payload": {
+                        "round_id": str(active.round_id),
+                        "user_id": str(uid),
+                        "bracket_index": pstate.bracket_index,
+                    },
+                }
+            )
+        if pstate.finished:
+            await websocket.send_json(
+                {
+                    "type": "player_finished",
+                    "payload": {
+                        "round_id": str(active.round_id),
+                        "user_id": str(uid),
+                        "outcome": pstate.outcome,
+                        "points": pstate.points,
+                    },
+                }
+            )
+
+    if user_id in active.picker_ids and active.picker_attempts:
+        await websocket.send_json(
+            {
+                "type": "picker_view",
+                "payload": {
+                    "round_id": str(active.round_id),
+                    "attempts": active.picker_attempts,
+                },
+            }
+        )
+
+    # Restore the reconnecting user's own attempt history (their own
+    # past guesses + skips this round) so the UI above the play button
+    # is not blank after a refresh.
+    own_attempts = [
+        a for a in active.picker_attempts if a.get("user_id") == str(user_id)
+    ]
+    if own_attempts:
+        await websocket.send_json(
+            {
+                "type": "my_attempts",
+                "payload": {
+                    "round_id": str(active.round_id),
+                    "attempts": own_attempts,
+                },
+            }
+        )
+
+
 @router.websocket("/rooms/{room_id}/ws")
 async def room_ws(websocket: WebSocket, room_id: UUID) -> None:
     token = websocket.cookies.get("session")
@@ -141,6 +241,10 @@ async def room_ws(websocket: WebSocket, room_id: UUID) -> None:
         await websocket.send_json(
             {"type": "room_state", "payload": snapshot.model_dump(mode="json")}
         )
+        # Re-hydrate a mid-round reconnect. `room_state` only carries lobby
+        # data; without this replay the client sits on the "Setting up the
+        # next round…" placeholder until the round naturally ends.
+        await _replay_active_round(websocket, key, user_id)
         await state.hub.broadcast(
             key,
             {"type": "player_joined", "payload": {"user_id": str(user_id)}},

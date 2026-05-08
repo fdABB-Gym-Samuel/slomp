@@ -32,12 +32,16 @@ async def start_game(room_key: str) -> None:
     """Build the song queue, reset scores, and start the first round.
     Must be called only when transitioning into the `playing` phase.
 
-    Queue ordering: each picker's submitted songs are kept in submission
+    Classic queue: each picker's submitted songs are kept in submission
     order, but rounds round-robin between pickers so no player has multiple
     of their songs played back-to-back. The picker order is shuffled once
     at game start for fairness. When multiple players picked the same song,
     it appears once in the queue (taken on the lap of whichever picker hits
-    it first under the shuffled order)."""
+    it first under the shuffled order).
+
+    Random queue: every song attached to the room (which `change_phase`
+    pre-populated from Deezer) is played, in shuffled order. There are no
+    pickers, so every non-spectating player guesses every song."""
     async with db.pool().acquire() as conn:
         room = await conn.fetchrow(
             "SELECT id, settings FROM rooms WHERE id = $1", UUID(room_key)
@@ -47,11 +51,6 @@ async def start_game(room_key: str) -> None:
                 404, detail={"code": "room_not_found", "message": "room not found"}
             )
 
-        picker_rows = await conn.fetch(
-            "SELECT song_id, user_id FROM room_song_pickers WHERE room_id = $1 "
-            "ORDER BY submitted_at ASC",
-            room["id"],
-        )
         await conn.execute(
             "UPDATE room_players SET score = 0 WHERE room_id = $1",
             room["id"],
@@ -61,24 +60,38 @@ async def start_game(room_key: str) -> None:
             room["id"],
         )
 
-    songs_by_picker: dict[UUID, list[UUID]] = defaultdict(list)
-    for r in picker_rows:
-        songs_by_picker[r["user_id"]].append(r["song_id"])
+        settings = _decode_settings(room["settings"])
+        if settings.game_mode == "random":
+            song_rows = await conn.fetch(
+                "SELECT id FROM room_songs WHERE room_id = $1 ORDER BY play_order ASC",
+                room["id"],
+            )
+            queue: list[UUID] = [r["id"] for r in song_rows]
+            random.shuffle(queue)
+        else:
+            picker_rows = await conn.fetch(
+                "SELECT song_id, user_id FROM room_song_pickers WHERE room_id = $1 "
+                "ORDER BY submitted_at ASC",
+                room["id"],
+            )
+            songs_by_picker: dict[UUID, list[UUID]] = defaultdict(list)
+            for r in picker_rows:
+                songs_by_picker[r["user_id"]].append(r["song_id"])
 
-    picker_order = list(songs_by_picker.keys())
-    random.shuffle(picker_order)
+            picker_order = list(songs_by_picker.keys())
+            random.shuffle(picker_order)
 
-    queue: list[UUID] = []
-    seen: set[UUID] = set()
-    if songs_by_picker:
-        max_count = max(len(s) for s in songs_by_picker.values())
-        for lap in range(max_count):
-            for pid in picker_order:
-                if lap < len(songs_by_picker[pid]):
-                    sid = songs_by_picker[pid][lap]
-                    if sid not in seen:
-                        queue.append(sid)
-                        seen.add(sid)
+            queue = []
+            seen: set[UUID] = set()
+            if songs_by_picker:
+                max_count = max(len(s) for s in songs_by_picker.values())
+                for lap in range(max_count):
+                    for pid in picker_order:
+                        if lap < len(songs_by_picker[pid]):
+                            sid = songs_by_picker[pid][lap]
+                            if sid not in seen:
+                                queue.append(sid)
+                                seen.add(sid)
 
     game = await state.registry.get_or_create(room_key)
     async with game.lock:
@@ -93,6 +106,11 @@ async def _start_next_round(room_key: str) -> None:
     """Pop the next song from the queue and start a round. If empty → end game."""
     game = await state.registry.get_or_create(room_key)
     async with game.lock:
+        # The intermission window has lapsed by definition once we're starting
+        # the next round, so clear the cached payload to avoid stale-replay on
+        # a mid-round reconnect.
+        game.last_round_payload = None
+        game.intermission_ends_at = None
         if not game.song_queue:
             await _end_game(room_key)
             return
@@ -137,6 +155,7 @@ async def _start_next_round(room_key: str) -> None:
         if r["user_id"] not in picker_ids:
             players[r["user_id"]] = state.PlayerRoundState(user_id=r["user_id"])
 
+    duration = NO_GUESSERS_DURATION if not players else settings.round_max_seconds
     active = state.ActiveRound(
         round_id=round_row["id"],
         song_id=song["id"],
@@ -151,9 +170,10 @@ async def _start_next_round(room_key: str) -> None:
         brackets=brackets,
         players=players,
         hint_field=settings.hint_field,
+        round_max_seconds=duration,
+        album_art_enabled=settings.album_art_enabled,
     )
 
-    duration = NO_GUESSERS_DURATION if not players else settings.round_max_seconds
     async with game.lock:
         game.active_round = active
         if game.timeout_task is not None:
@@ -163,6 +183,7 @@ async def _start_next_round(room_key: str) -> None:
         )
 
     audio_url = f"/rooms/{room_key}/rounds/{active.round_id}/audio"
+    cover_url = f"/rooms/{room_key}/rounds/{active.round_id}/cover"
     await state.hub.broadcast(
         room_key,
         {
@@ -172,8 +193,11 @@ async def _start_next_round(room_key: str) -> None:
                 "picker_ids": [str(pid) for pid in active.picker_ids],
                 "started_at_server": active.started_at.isoformat(),
                 "audio_url": audio_url,
-                "album_image_url": active.album_image_url
-                if settings.album_art_enabled
+                # Send the proxy URL rather than Deezer's CDN URL — the proxy
+                # blurs server-side based on the requesting player's bracket,
+                # so the unblurred bytes never reach the wire until reveal.
+                "album_image_url": cover_url
+                if settings.album_art_enabled and active.album_image_url
                 else None,
                 "guess_brackets_seconds": brackets,
                 "round_max_seconds": duration,
@@ -329,7 +353,14 @@ async def submit_guess(
         all_done = active.all_finished()
 
     if all_done:
-        await _end_round(room_key)
+        # Kick the round transition off in the background so the HTTP
+        # response returns immediately. Awaiting here would block /guess and
+        # /skip for the entire intermission window (typically 6s), and would
+        # also let the WS round_ended/round_started events for the *next*
+        # round arrive at the client before this response — meaning the
+        # caller would append the just-finished guess into the next round's
+        # state. The client still guards the append against a stale round id.
+        asyncio.create_task(_end_round(room_key))
     return result
 
 
@@ -403,7 +434,14 @@ async def submit_skip(room_key: str, user_id: UUID, round_id: UUID) -> dict:
         all_done = active.all_finished()
 
     if all_done:
-        await _end_round(room_key)
+        # Kick the round transition off in the background so the HTTP
+        # response returns immediately. Awaiting here would block /guess and
+        # /skip for the entire intermission window (typically 6s), and would
+        # also let the WS round_ended/round_started events for the *next*
+        # round arrive at the client before this response — meaning the
+        # caller would append the just-finished guess into the next round's
+        # state. The client still guards the append against a stale round id.
+        asyncio.create_task(_end_round(room_key))
     return result
 
 
@@ -475,19 +513,18 @@ async def _send_picker_attempt(
     bracket_index: int,
     hint_fulfilled: bool,
 ) -> None:
-    payload = {
-        "round_id": str(active.round_id),
-        "attempts": [
-            {
-                "user_id": str(user_id),
-                "kind": kind,
-                "guess_text": guess_text,
-                "correct": correct,
-                "bracket_index": bracket_index,
-                "hint_fulfilled": hint_fulfilled,
-            }
-        ],
+    attempt = {
+        "user_id": str(user_id),
+        "kind": kind,
+        "guess_text": guess_text,
+        "correct": correct,
+        "bracket_index": bracket_index,
+        "hint_fulfilled": hint_fulfilled,
     }
+    # Persist on the round so a picker reconnecting mid-round can replay
+    # the same attempts they would have seen had they stayed connected.
+    active.picker_attempts.append(attempt)
+    payload = {"round_id": str(active.round_id), "attempts": [attempt]}
     message = {"type": "picker_view", "payload": payload}
     for picker_id in active.picker_ids:
         await state.hub.send_to(room_key, picker_id, message)
@@ -588,28 +625,38 @@ async def _end_round(room_key: str) -> None:
         if active.preview_url
         else None
     )
+    cover_url = (
+        f"/rooms/{room_key}/rounds/{active.round_id}/cover"
+        if active.album_image_url
+        else None
+    )
+    payload = {
+        "round_id": str(active.round_id),
+        "title": active.title,
+        "artist": active.artist,
+        "album_image_url": cover_url,
+        "full_audio_url": full_audio_url,
+        "scoreboard": scoreboard,
+        "intermission_seconds": intermission,
+        "is_last_round": is_last_round,
+    }
+    # Stash before broadcasting so a reconnect that races with the broadcast
+    # still finds it. Cleared at the top of `_start_next_round` once the
+    # window has lapsed.
+    game.last_round_payload = payload
+    game.intermission_ends_at = (
+        asyncio.get_running_loop().time() + intermission if intermission > 0 else None
+    )
     await state.hub.broadcast(
         room_key,
-        {
-            "type": "round_ended",
-            "payload": {
-                "round_id": str(active.round_id),
-                "title": active.title,
-                "artist": active.artist,
-                "album_image_url": active.album_image_url,
-                "full_audio_url": full_audio_url,
-                "scoreboard": scoreboard,
-                "intermission_seconds": 0 if is_last_round else intermission,
-                "is_last_round": is_last_round,
-            },
-        },
+        {"type": "round_ended", "payload": payload},
     )
 
+    if intermission > 0:
+        await asyncio.sleep(intermission)
     if is_last_round:
         await _end_game(room_key)
     else:
-        if intermission > 0:
-            await asyncio.sleep(intermission)
         await _start_next_round(room_key)
 
 

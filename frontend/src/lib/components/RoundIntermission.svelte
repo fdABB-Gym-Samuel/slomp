@@ -136,7 +136,9 @@
         Next round in {secondsLeft}s…
       </p>
     {:else}
-      <p class="mt-2 text-sm text-text-muted">Final results coming up…</p>
+      <p class="mt-2 text-sm text-text-muted">
+        Final results in {secondsLeft}s…
+      </p>
     {/if}
   </div>
 

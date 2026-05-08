@@ -202,11 +202,6 @@
     }
   }
 
-  async function logout() {
-    await auth.logout();
-    goto('/login');
-  }
-
   onMount(() => {
     loadMyRooms();
     if (auth.user) openLobbyWs();
@@ -216,16 +211,8 @@
 </script>
 
 <div class="mx-auto max-w-2xl p-8">
-  <header class="mb-12 flex items-baseline justify-between">
+  <header class="mb-12">
     <h1 class="text-4xl font-bold tracking-tight text-accent">slomp</h1>
-    {#if auth.user}
-      <div class="flex items-center gap-4 text-sm">
-        <span class="text-text-secondary">
-          signed in as <span class="text-text-primary">{auth.user.username}</span>
-        </span>
-        <button class="btn-ghost" onclick={logout}>Log out</button>
-      </div>
-    {/if}
   </header>
 
   {#if myRooms.length > 0}

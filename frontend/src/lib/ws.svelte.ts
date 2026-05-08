@@ -2,6 +2,7 @@ import { api } from "./api";
 import { auth } from "./auth.svelte";
 import type {
   ActiveRoundInfo,
+  MyAttempt,
   PickerAttempt,
   Room,
   ScoreboardEntry,
@@ -20,6 +21,7 @@ class RoomConnection {
     Record<string, { outcome: "correct" | "exhausted"; points: number }>
   >({});
   pickerAttempts = $state<PickerAttempt[]>([]);
+  myAttempts = $state<MyAttempt[]>([]);
   kickedSelf = $state(false);
   lastRoundResult = $state<{
     title: string;
@@ -105,6 +107,7 @@ class RoomConnection {
     this.bracketIndices = {};
     this.finishedPlayers = {};
     this.pickerAttempts = [];
+    this.myAttempts = [];
     this.kickedSelf = false;
     this.lastRoundResult = null;
     this.finalScoreboard = null;
@@ -211,6 +214,7 @@ class RoomConnection {
         this.bracketIndices = {};
         this.finishedPlayers = {};
         this.pickerAttempts = [];
+        this.myAttempts = [];
         this.lastRoundResult = null;
         break;
 
@@ -236,6 +240,18 @@ class RoomConnection {
           ...this.pickerAttempts,
           ...(ev.payload.attempts as PickerAttempt[]),
         ];
+        break;
+
+      case "my_attempts":
+        // Sent by the server on reconnect to restore the current player's
+        // own guess/skip history for the active round.
+        this.myAttempts = (ev.payload.attempts as PickerAttempt[]).map((a) => ({
+          kind: a.kind,
+          bracket_index: a.bracket_index,
+          guess_text: a.guess_text,
+          correct: a.correct,
+          hint_fulfilled: a.hint_fulfilled,
+        }));
         break;
 
       case "round_ended": {
@@ -272,6 +288,7 @@ class RoomConnection {
     this.bracketIndices = {};
     this.finishedPlayers = {};
     this.pickerAttempts = [];
+    this.myAttempts = [];
   }
 }
 

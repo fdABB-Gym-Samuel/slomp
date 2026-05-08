@@ -22,6 +22,16 @@ class UserOut(BaseModel):
     username: str
 
 
+class ChangeUsernameRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
+    current_password: str = Field(min_length=1, max_length=256)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
+
+
 # ---------- rooms ---------------------------------------------------------
 
 
@@ -29,8 +39,16 @@ RoomStatus = Literal["lobby", "selecting", "playing", "results"]
 
 HintField = Literal["none", "artist", "album"]
 
+GameMode = Literal["classic", "random"]
+
+ObscureMode = Literal["blur", "pixelate"]
+
 
 class RoomSettings(BaseModel):
+    game_mode: GameMode = "classic"
+    # Number of rounds in random mode. Ignored when game_mode == "classic"
+    # (the pool is determined by submissions there).
+    random_song_count: int = Field(default=10, ge=1, le=50)
     min_popularity: int = Field(default=0, ge=0, le=100)
     required_artists: list[str] = Field(default_factory=list)
     songs_per_player: int = Field(default=3, ge=1, le=10)
@@ -39,6 +57,16 @@ class RoomSettings(BaseModel):
     )
     album_art_enabled: bool = True
     album_art_unblur: bool = True
+    # How the cover is progressively revealed: a Gaussian blur whose radius
+    # shrinks bracket-by-bracket, or a pixel-block mosaic whose tiles get
+    # smaller until the image is sharp.
+    album_art_obscure_mode: ObscureMode = "blur"
+    # One intensity value per bracket — interpretation depends on mode:
+    # blur → Gaussian radius in px (0..256, 0 = sharp); pixelate → block
+    # size in px on the source 256-px cover (1..256, 1 = sharp). Length
+    # must match guess_brackets_seconds; empty means "use the default
+    # linear ramp" (24→0 for blur, 16→1 for pixelate).
+    album_art_obscure_per_bracket_px: list[int] = Field(default_factory=list)
     hint_field: HintField = "none"
     round_intermission_seconds: int = Field(default=6, ge=0, le=30)
     round_max_seconds: int = Field(default=60, ge=10, le=600)

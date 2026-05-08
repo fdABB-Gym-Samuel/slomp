@@ -31,6 +31,20 @@ class AuthStore {
     await api.logout();
     this.user = null;
   }
+
+  async changeUsername(
+    username: string,
+    currentPassword: string,
+  ): Promise<void> {
+    this.user = await api.changeUsername(username, currentPassword);
+  }
+
+  async changePassword(
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<void> {
+    await api.changePassword(currentPassword, newPassword);
+  }
 }
 
 export const auth = new AuthStore();

@@ -24,6 +24,7 @@
   let visibilityError = $state<string | null>(null);
 
   const isLeader = $derived(auth.user?.id === roomData.leader_id);
+  const isRandom = $derived(roomData.settings.game_mode === 'random');
   const shareLink = $derived(
     roomData.code
       ? `${$page.url.origin}/room/${roomData.id}?code=${roomData.code}`
@@ -78,7 +79,9 @@
     starting = true;
     startError = null;
     try {
-      await api.changePhase(roomData.id, 'selecting');
+      // Random mode skips picking entirely — the server fills the queue
+      // with chart picks when the room enters the playing phase.
+      await api.changePhase(roomData.id, isRandom ? 'playing' : 'selecting');
     } catch (e) {
       startError = e instanceof APIError ? e.message : String(e);
     } finally {
@@ -293,8 +296,14 @@
       <h2 class="text-lg font-semibold">Start the game</h2>
       {#if isLeader}
         <p class="text-sm text-text-secondary">
-          Once you start, players will pick their songs in the next phase. Make
-          sure your settings look right under the Settings tab.
+          {#if isRandom}
+            Random mode: as soon as you start, the server will draw {roomData
+              .settings.random_song_count} popular tracks and the game begins —
+            no song selection phase.
+          {:else}
+            Once you start, players will pick their songs in the next phase.
+            Make sure your settings look right under the Settings tab.
+          {/if}
         </p>
         {#if settingsDirty}
           <div class="rounded-md border border-orange-500/40 bg-orange-500/10 p-3 text-sm text-orange-500">
@@ -307,19 +316,23 @@
         {#if startError}
           <p class="text-sm text-danger">{startError}</p>
         {/if}
+        {@const minPlayers = isRandom ? 1 : 2}
+        {@const tooFew = roomData.players.length < minPlayers}
         <button
           class="btn-primary w-full"
-          disabled={starting || roomData.players.length < 2}
+          disabled={starting || tooFew}
           onclick={startSelecting}
-          title={roomData.players.length < 2
+          title={tooFew
             ? 'need at least 2 players — solo games have no one to guess'
             : ''}
         >
           {starting
             ? 'Starting…'
-            : roomData.players.length < 2
+            : tooFew
               ? 'Need at least 2 players'
-              : 'Start song selection'}
+              : isRandom
+                ? 'Start the game'
+                : 'Start song selection'}
         </button>
       {:else}
         <p class="text-sm text-text-secondary">

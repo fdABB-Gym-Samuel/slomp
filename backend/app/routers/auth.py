@@ -4,7 +4,13 @@ import asyncpg
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
 
 from .. import auth, db
-from ..models import LoginRequest, RegisterRequest, UserOut
+from ..models import (
+    ChangePasswordRequest,
+    ChangeUsernameRequest,
+    LoginRequest,
+    RegisterRequest,
+    UserOut,
+)
 from ..password import hash_password, needs_rehash, verify_password
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -85,3 +91,64 @@ async def me(user_id: UUID = Depends(auth.get_current_user_id)) -> UserOut:
             detail={"code": "user_not_found", "message": "user not found"},
         )
     return UserOut(id=row["id"], username=row["username"])
+
+
+@router_me.patch("/me/username", response_model=UserOut)
+async def change_username(
+    req: ChangeUsernameRequest,
+    user_id: UUID = Depends(auth.get_current_user_id),
+) -> UserOut:
+    async with db.pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT password_hash FROM users WHERE id = $1", user_id
+        )
+        if row is None:
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED,
+                detail={"code": "user_not_found", "message": "user not found"},
+            )
+        if not verify_password(req.current_password, row["password_hash"]):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail={"code": "invalid_password", "message": "incorrect password"},
+            )
+        try:
+            updated = await conn.fetchrow(
+                "UPDATE users SET username = $1 WHERE id = $2 RETURNING id, username",
+                req.username,
+                user_id,
+            )
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail={"code": "username_taken", "message": "username already taken"},
+            )
+    return UserOut(id=updated["id"], username=updated["username"])
+
+
+@router_me.patch("/me/password", status_code=204)
+async def change_password(
+    req: ChangePasswordRequest,
+    user_id: UUID = Depends(auth.get_current_user_id),
+) -> Response:
+    async with db.pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT password_hash FROM users WHERE id = $1", user_id
+        )
+        if row is None:
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED,
+                detail={"code": "user_not_found", "message": "user not found"},
+            )
+        if not verify_password(req.current_password, row["password_hash"]):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail={"code": "invalid_password", "message": "incorrect password"},
+            )
+        new_hash = hash_password(req.new_password)
+        await conn.execute(
+            "UPDATE users SET password_hash = $1 WHERE id = $2",
+            new_hash,
+            user_id,
+        )
+    return Response(status_code=204)

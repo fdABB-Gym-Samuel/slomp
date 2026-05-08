@@ -17,6 +17,7 @@ fields like `spotify_track_id` now hold Deezer integer IDs (as strings).
 
 import asyncio
 import logging
+import random
 from typing import Any
 
 import httpx
@@ -122,6 +123,44 @@ async def search_artists(query: str, limit: int = 10) -> list[dict]:
 
 async def get_track(track_id: str) -> dict:
     return await _api_get(f"/track/{track_id}")
+
+
+# Genre IDs used to assemble a diverse pool of "popular" tracks for the
+# random gamemode. 0 = the global all-genres chart; the rest are major
+# Deezer genre buckets. Pulling from several at once gets us ~600 unique
+# tracks before filtering, even though each individual chart caps at 100.
+_RANDOM_GENRE_IDS = (0, 132, 116, 152, 113, 165, 84, 173)
+
+
+async def fetch_random_tracks(min_popularity: int, count: int) -> list[dict]:
+    """Pull a pool of popular tracks from Deezer charts (multiple genres),
+    drop anything without a preview or below `min_popularity`, then return
+    a random sample of size `count`. May return fewer than `count` if the
+    filter is too tight to fill the request."""
+    rules = {"min_popularity": min_popularity, "required_artists": []}
+
+    async def _one(gid: int) -> list[dict]:
+        try:
+            data = await _api_get(f"/chart/{gid}/tracks", {"limit": 100})
+            return data.get("data", [])
+        except Exception:
+            logger.warning("chart fetch failed for genre=%s", gid)
+            return []
+
+    batches = await asyncio.gather(*(_one(g) for g in _RANDOM_GENRE_IDS))
+    pool: dict[Any, dict] = {}
+    for batch in batches:
+        for t in batch:
+            tid = t.get("id")
+            if tid is None or tid in pool:
+                continue
+            ok, _ = matches_rules(t, rules)
+            if ok:
+                pool[tid] = t
+
+    tracks = list(pool.values())
+    random.shuffle(tracks)
+    return tracks[:count]
 
 
 async def get_artist(artist_id: str) -> dict:

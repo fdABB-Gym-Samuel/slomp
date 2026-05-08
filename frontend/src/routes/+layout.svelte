@@ -4,10 +4,13 @@
   import { auth } from '$lib/auth.svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
+  import Navbar from '$lib/components/Navbar.svelte';
 
   let { children } = $props();
 
   const PUBLIC_ROUTES = ['/login', '/register'];
+
+  let showNavbar = $derived(!PUBLIC_ROUTES.includes($page.url.pathname));
 
   onMount(async () => {
     await auth.refresh();
@@ -23,5 +26,8 @@
     <p class="text-text-muted">Loading…</p>
   </div>
 {:else}
+  {#if showNavbar}
+    <Navbar />
+  {/if}
   {@render children()}
 {/if}

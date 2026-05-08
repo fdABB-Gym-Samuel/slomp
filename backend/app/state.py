@@ -37,6 +37,13 @@ class ActiveRound:
     brackets: list[float]
     players: dict[UUID, PlayerRoundState]
     hint_field: str = "none"
+    # Captured at round start so a reconnecting client can be re-hydrated
+    # without re-deriving from settings: the gated cover-art URL the picker
+    # would have seen, the round's wall-clock duration, and the running
+    # log of attempts that has been mirrored to the picker(s).
+    round_max_seconds: float = 0.0
+    album_art_enabled: bool = True
+    picker_attempts: list[dict] = field(default_factory=list)
 
     def all_finished(self) -> bool:
         return all(p.finished for p in self.players.values())
@@ -53,6 +60,13 @@ class RoomGame:
     completed_round_ids: list[UUID] = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     timeout_task: asyncio.Task | None = None
+    # The most recent `round_ended` broadcast payload + the wall-clock deadline
+    # at which the intermission lapses, so a mid-intermission reconnect can be
+    # re-shown the same scoreboard reveal instead of landing on the empty
+    # "setting up the next round…" placeholder. Cleared at the start of the
+    # next round (or on game end / restart).
+    last_round_payload: dict | None = None
+    intermission_ends_at: float | None = None
 
 
 class GameRegistry:

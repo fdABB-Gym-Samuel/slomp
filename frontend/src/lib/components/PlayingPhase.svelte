@@ -7,21 +7,16 @@
 
   let { roomData }: { roomData: Room } = $props();
 
-  type LocalAttempt = {
-    kind: 'guess' | 'skip';
-    bracket_index: number;
-    guess_text: string | null;
-    correct: boolean | null;
-    hint_fulfilled: boolean;
-  };
-
   let query = $state('');
   let searchResults = $state<SongCandidate[]>([]);
   let searching = $state(false);
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
   let lastResult = $state<{ correct: boolean; points: number } | null>(null);
-  let myAttempts = $state<LocalAttempt[]>([]);
+  // The player's own guess/skip history for the active round lives on the
+  // shared room store so a mid-round reconnect can re-hydrate it from the
+  // server-replayed `my_attempts` event.
+  const myAttempts = $derived(room.myAttempts);
   let submitting = $state(false);
   let error = $state<string | null>(null);
   let showMatchingHelp = $state(false);
@@ -60,6 +55,22 @@
       ? Math.max(0, Math.ceil((roundDeadline - now) / 1000))
       : null
   );
+  // Continuous 0..1 ratio of round time remaining, used for smooth color
+  // interpolation independently of the integer seconds shown in the UI.
+  const timeRatio = $derived.by(() => {
+    if (!active || roundDeadline === null) return 1;
+    const totalMs = active.round_max_seconds * 1000;
+    return Math.max(0, Math.min(1, (roundDeadline - now) / totalMs));
+  });
+  const timerColor = $derived.by(() => {
+    const r = timeRatio;
+    // Hue glides from a calm yellow (~50°) at full time down to red (0°).
+    // Saturation and darkness ramp up near the end so the badge feels urgent.
+    const hue = r * 50;
+    const sat = 25 + (1 - r) * 60;
+    const light = 65 - (1 - r) * 10;
+    return `hsl(${hue}, ${sat}%, ${light}%)`;
+  });
   const pickerNames = $derived(
     active
       ? active.picker_ids.map(
@@ -95,19 +106,14 @@
     return 'text-danger';
   }
 
-  const blurAmount = $derived(
-    roomData.settings.album_art_unblur && brackets.length > 0
-      ? Math.max(0, 24 - 24 * (myBracket / Math.max(1, brackets.length - 1)))
-      : 0
-  );
 
   $effect(() => {
-    // When the active round changes, reset local state.
+    // When the active round changes, reset local state. (myAttempts lives
+    // on the room store and is reset there by the round_started handler.)
     active;
     query = '';
     searchResults = [];
     lastResult = null;
-    myAttempts = [];
     playbackSec = 0;
     srcBracket = null;
     if (audio && !audio.paused) audio.pause();
@@ -218,15 +224,20 @@
     submitting = true;
     error = null;
     const priorBracket = myBracket;
+    // Capture the round we're guessing against — if the round transitions
+    // (round_started clears myAttempts) before the response lands, dropping
+    // this update prevents the stale guess from leaking into the next round.
+    const guessRoundId = active.round_id;
     try {
       const r = await api.guess(
         roomData.id,
         active.round_id,
         track.spotify_track_id
       );
+      if (room.activeRound?.round_id !== guessRoundId) return;
       lastResult = { correct: r.correct, points: r.points };
-      myAttempts = [
-        ...myAttempts,
+      room.myAttempts = [
+        ...room.myAttempts,
         {
           kind: 'guess',
           bracket_index: priorBracket,
@@ -249,11 +260,13 @@
     submitting = true;
     error = null;
     const priorBracket = myBracket;
+    const guessRoundId = active.round_id;
     try {
       await api.skip(roomData.id, active.round_id);
+      if (room.activeRound?.round_id !== guessRoundId) return;
       lastResult = null;
-      myAttempts = [
-        ...myAttempts,
+      room.myAttempts = [
+        ...room.myAttempts,
         {
           kind: 'skip',
           bracket_index: priorBracket,
@@ -352,29 +365,48 @@
           {/if}
         </div>
       {:else}
-        <div class="card flex flex-col items-center gap-4">
-          <p class="text-sm text-text-muted">
-            Picked by <span class="text-text-primary">{pickerLabel}</span>
-          </p>
-
+        <div class="card relative flex flex-col items-center gap-4">
           {#if secondsLeft !== null}
-            <p
-              class="font-mono text-sm"
-              class:text-text-muted={secondsLeft > 10}
-              class:text-warning={secondsLeft <= 10 && secondsLeft > 3}
-              class:text-danger={secondsLeft <= 3}
+            <div
+              class="absolute left-4 top-4 flex items-center gap-1.5 font-mono text-sm font-semibold transition-colors duration-300"
+              style="color: {timerColor}"
+              aria-label="Time left in round"
             >
-              {secondsLeft}s left
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                class="h-4 w-4"
+                aria-hidden="true"
+              >
+                <circle cx="12" cy="12" r="9" />
+                <polyline points="12 7 12 12 15 14" />
+              </svg>
+              <span>{secondsLeft}s</span>
+            </div>
+          {/if}
+
+          {#if active.picker_ids.length > 0}
+            <p class="text-sm text-text-muted">
+              Picked by <span class="text-text-primary">{pickerLabel}</span>
             </p>
           {/if}
 
           {#if active.album_image_url}
-            <img
-              src={active.album_image_url}
-              alt=""
-              class="h-64 w-64 rounded shadow-xl transition-[filter] duration-700"
-              style="filter: blur({blurAmount}px)"
-            />
+            <!-- The proxy applies the blur server-side keyed off the
+                 requesting player's bracket, so the unblurred bytes never
+                 reach the wire. The ?b=… suffix is purely a cache-bust so
+                 the browser refetches when we cross into a new bracket. -->
+            <div class="h-64 w-64 overflow-hidden rounded shadow-xl">
+              <img
+                src={`${active.album_image_url}?b=${myBracket}`}
+                alt=""
+                class="h-full w-full"
+              />
+            </div>
           {/if}
 
           <!-- Past attempts: stacked vertically and centered between cover and bar -->

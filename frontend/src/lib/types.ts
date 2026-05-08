@@ -7,13 +7,21 @@ export type RoomStatus = "lobby" | "selecting" | "playing" | "results";
 
 export type HintField = "none" | "artist" | "album";
 
+export type GameMode = "classic" | "random";
+
+export type ObscureMode = "blur" | "pixelate";
+
 export interface RoomSettings {
+  game_mode: GameMode;
+  random_song_count: number;
   min_popularity: number;
   required_artists: string[];
   songs_per_player: number;
   guess_brackets_seconds: number[];
   album_art_enabled: boolean;
   album_art_unblur: boolean;
+  album_art_obscure_mode: ObscureMode;
+  album_art_obscure_per_bracket_px: number[];
   hint_field: HintField;
   round_intermission_seconds: number;
   round_max_seconds: number;
@@ -122,5 +130,13 @@ export interface PickerAttempt {
   guess_text: string | null;
   correct: boolean | null;
   bracket_index: number;
+  hint_fulfilled: boolean;
+}
+
+export interface MyAttempt {
+  kind: "guess" | "skip";
+  bracket_index: number;
+  guess_text: string | null;
+  correct: boolean | null;
   hint_fulfilled: boolean;
 }

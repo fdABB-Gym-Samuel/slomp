@@ -76,6 +76,19 @@ export const api = {
     }),
   logout: () => request<void>("/auth/logout", { method: "POST" }),
   me: () => request<User>("/me"),
+  changeUsername: (username: string, currentPassword: string) =>
+    request<User>("/me/username", {
+      method: "PATCH",
+      body: JSON.stringify({ username, current_password: currentPassword }),
+    }),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<void>("/me/password", {
+      method: "PATCH",
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    }),
 
   createRoom: () => request<Room>("/rooms", { method: "POST" }),
   getRoom: (id: string) => request<Room>(`/rooms/${id}`),
