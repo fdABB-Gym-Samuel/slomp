@@ -14,7 +14,7 @@ NO_GUESSERS_DURATION = 1.0
 
 from fastapi import HTTPException, status
 
-from . import db, matching, spotify, state
+from . import db, deezer, matching, state
 from .models import RoomSettings, serialize_settings
 
 
@@ -208,7 +208,7 @@ async def submit_guess(
     guess_artist = ""
     guess_album: str | None = None
     try:
-        guess_track = await spotify.get_track(guessed_track_id)
+        guess_track = await deezer.get_track(guessed_track_id)
         guess_title = guess_track.get("title", "<unknown>")
         artist_obj = guess_track.get("artist") or {}
         guess_artist = artist_obj.get("name", "")

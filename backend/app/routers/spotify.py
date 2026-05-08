@@ -5,7 +5,7 @@ from uuid import UUID
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from .. import auth, db, spotify
+from .. import auth, db, deezer
 from ..models import RoomSettings, SongCandidate
 
 router = APIRouter(prefix="/spotify", tags=["spotify"])
@@ -56,7 +56,7 @@ async def search(
             # ourselves so the artist's real tracks lead, regardless of
             # which artist's batch they came from.
             artist_lookups = await asyncio.gather(
-                *(spotify.get_artist(aid) for aid in required_ids),
+                *(deezer.get_artist(aid) for aid in required_ids),
                 return_exceptions=True,
             )
             artist_names = [
@@ -64,20 +64,20 @@ async def search(
                 for a in artist_lookups
                 if isinstance(a, dict) and a.get("name")
             ]
-            tracks = await spotify.search_tracks_for_artists(q, artist_names)
-            tracks.sort(key=lambda t: spotify.relevance_score(t, q), reverse=True)
+            tracks = await deezer.search_tracks_for_artists(q, artist_names)
+            tracks.sort(key=lambda t: deezer.relevance_score(t, q), reverse=True)
         else:
-            tracks = await spotify.search_tracks(q, limit=limit)
+            tracks = await deezer.search_tracks(q, limit=limit)
     except httpx.HTTPStatusError as e:
         raise _upstream_to_http_error(e)
 
     out: list[SongCandidate] = []
     for t in tracks:
         if rules is not None:
-            ok, _ = spotify.matches_rules(t, rules)
+            ok, _ = deezer.matches_rules(t, rules)
             if not ok:
                 continue
-        out.append(SongCandidate.model_validate(spotify.serialize_candidate(t)))
+        out.append(SongCandidate.model_validate(deezer.serialize_candidate(t)))
         if len(out) >= limit:
             break
     return out
@@ -100,7 +100,7 @@ async def search_artists_endpoint(
     user_id: UUID = Depends(auth.get_current_user_id),
 ) -> list[dict]:
     try:
-        artists = await spotify.search_artists(q, limit=limit)
+        artists = await deezer.search_artists(q, limit=limit)
     except httpx.HTTPStatusError as e:
         raise _upstream_to_http_error(e)
 
@@ -120,7 +120,7 @@ async def get_artists_by_ids(
         return []
     try:
         artists = await asyncio.gather(
-            *(spotify.get_artist(aid) for aid in id_list),
+            *(deezer.get_artist(aid) for aid in id_list),
             return_exceptions=True,
         )
     except httpx.HTTPStatusError as e:

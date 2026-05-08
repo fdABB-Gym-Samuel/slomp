@@ -4,7 +4,7 @@ from uuid import UUID
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
-from .. import auth, db, game, spotify, state
+from .. import auth, db, deezer, game, state
 from ..models import (
     JoinByCodeRequest,
     MyRoomOut,
@@ -634,8 +634,8 @@ async def submit_song(
                 },
             )
 
-    track = await spotify.get_track(req.spotify_track_id)
-    ok, reason = spotify.matches_rules(track, settings.model_dump())
+    track = await deezer.get_track(req.spotify_track_id)
+    ok, reason = deezer.matches_rules(track, settings.model_dump())
     if not ok:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -645,7 +645,7 @@ async def submit_song(
             },
         )
 
-    candidate = spotify.serialize_candidate(track)
+    candidate = deezer.serialize_candidate(track)
 
     async with db.pool().acquire() as conn:
         async with conn.transaction():
