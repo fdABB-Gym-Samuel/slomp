@@ -230,7 +230,6 @@ in
 
       (mkIf cfg.valkey.createLocally {
         services.redis = {
-          package = pkgs.valkey;
           servers.slomp = {
             enable = true;
             port = 6379;
