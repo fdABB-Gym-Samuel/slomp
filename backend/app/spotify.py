@@ -63,6 +63,10 @@ async def get_track(track_id: str) -> dict:
     return await _api_get(f"/track/{track_id}")
 
 
+async def get_artist(artist_id: str) -> dict:
+    return await _api_get(f"/artist/{artist_id}")
+
+
 def matches_rules(track: dict, rules: dict) -> tuple[bool, str | None]:
     """Validate a track against room rules. (popularity, required_artists,
     preview availability — genres are unsupported since Deezer only exposes

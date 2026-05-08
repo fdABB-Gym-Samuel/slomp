@@ -14,7 +14,7 @@
 
   async function load() {
     try {
-      scoreboard = await api.results(roomData.code);
+      scoreboard = await api.results(roomData.id);
     } catch (e) {
       error = e instanceof APIError ? e.message : String(e);
     }
@@ -32,7 +32,7 @@
     restarting = true;
     error = null;
     try {
-      await api.restart(roomData.code);
+      await api.restart(roomData.id);
     } catch (e) {
       error = e instanceof APIError ? e.message : String(e);
     } finally {

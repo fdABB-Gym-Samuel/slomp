@@ -198,10 +198,10 @@
     searching = true;
     error = null;
     try {
-      // Pass the room code so the search applies the room's rules (popularity,
+      // Pass the room id so the search applies the room's rules (popularity,
       // required artists). No point letting players guess songs the picker
       // couldn't have submitted.
-      searchResults = await api.spotifySearch(q, roomData.code);
+      searchResults = await api.spotifySearch(q, roomData.id);
     } catch (e) {
       error = e instanceof APIError ? e.message : String(e);
     } finally {
@@ -216,7 +216,7 @@
     const priorBracket = myBracket;
     try {
       const r = await api.guess(
-        roomData.code,
+        roomData.id,
         active.round_id,
         track.spotify_track_id
       );
@@ -246,7 +246,7 @@
     error = null;
     const priorBracket = myBracket;
     try {
-      await api.skip(roomData.code, active.round_id);
+      await api.skip(roomData.id, active.round_id);
       lastResult = null;
       myAttempts = [
         ...myAttempts,

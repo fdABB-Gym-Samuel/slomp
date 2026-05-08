@@ -6,7 +6,12 @@
   let {
     roomData,
     readonly = false,
-  }: { roomData: Room; readonly?: boolean } = $props();
+    dirty = $bindable(false),
+  }: {
+    roomData: Room;
+    readonly?: boolean;
+    dirty?: boolean;
+  } = $props();
 
   let local = $state<RoomSettings | null>(null);
   let bracketsText = $state('');
@@ -16,6 +21,41 @@
   $effect(() => {
     local = { ...roomData.settings };
     bracketsText = roomData.settings.guess_brackets_seconds.join(', ');
+  });
+
+  const isDirty = $derived.by(() => {
+    if (!local || readonly) return false;
+    const s = roomData.settings;
+    if (
+      local.songs_per_player !== s.songs_per_player ||
+      local.min_popularity !== s.min_popularity ||
+      local.album_art_enabled !== s.album_art_enabled ||
+      local.album_art_unblur !== s.album_art_unblur ||
+      local.hint_field !== s.hint_field ||
+      local.round_intermission_seconds !== s.round_intermission_seconds ||
+      local.round_max_seconds !== s.round_max_seconds
+    ) {
+      return true;
+    }
+    if (
+      local.required_artists.length !== s.required_artists.length ||
+      local.required_artists.some((a, i) => a !== s.required_artists[i])
+    ) {
+      return true;
+    }
+    const parsed = parseBrackets(bracketsText);
+    if (parsed === null) return true;
+    if (
+      parsed.length !== s.guess_brackets_seconds.length ||
+      parsed.some((b, i) => b !== s.guess_brackets_seconds[i])
+    ) {
+      return true;
+    }
+    return false;
+  });
+
+  $effect(() => {
+    dirty = isDirty;
   });
 
   function parseBrackets(text: string): number[] | null {
@@ -42,7 +82,7 @@
     saving = true;
     error = null;
     try {
-      await api.updateSettings(roomData.code, {
+      await api.updateSettings(roomData.id, {
         ...local,
         guess_brackets_seconds: brackets,
       });

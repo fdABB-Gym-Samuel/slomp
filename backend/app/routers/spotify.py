@@ -1,3 +1,4 @@
+import asyncio
 import json
 from uuid import UUID
 
@@ -23,17 +24,17 @@ def _upstream_to_http_error(e: httpx.HTTPStatusError) -> HTTPException:
 @router.get("/search", response_model=list[SongCandidate])
 async def search(
     q: str = Query(..., min_length=1),
-    room_code: str | None = Query(default=None),
+    room_id: UUID | None = Query(default=None),
     # Spotify caps Client-Credentials search at 10 results. Their docs still
     # say 50, but anything ≥15 returns 400 "Invalid limit". Capped at 10.
     limit: int = Query(default=10, ge=1, le=10),
     user_id: UUID = Depends(auth.get_current_user_id),
 ) -> list[SongCandidate]:
     rules: dict | None = None
-    if room_code:
+    if room_id is not None:
         async with db.pool().acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT settings FROM rooms WHERE code = $1", room_code
+                "SELECT settings FROM rooms WHERE id = $1", room_id
             )
         if row is not None:
             raw = row["settings"]
@@ -56,6 +57,16 @@ async def search(
     return out
 
 
+def _serialize_artist(a: dict) -> dict:
+    return {
+        "id": str(a["id"]),
+        "name": a["name"],
+        "image_url": a.get("picture_medium") or a.get("picture"),
+        "genres": [],
+        "popularity": None,
+    }
+
+
 @router.get("/artists/search")
 async def search_artists_endpoint(
     q: str = Query(..., min_length=1),
@@ -67,13 +78,30 @@ async def search_artists_endpoint(
     except httpx.HTTPStatusError as e:
         raise _upstream_to_http_error(e)
 
+    return [_serialize_artist(a) for a in artists]
+
+
+@router.get("/artists")
+async def get_artists_by_ids(
+    ids: str = Query(..., description="comma-separated Deezer artist ids"),
+    user_id: UUID = Depends(auth.get_current_user_id),
+) -> list[dict]:
+    """Resolve a list of artist IDs to their summaries. Used by the settings
+    UI to render chips for required_artists that were saved previously and
+    aren't in the search cache (e.g. after a page reload or game restart)."""
+    id_list = [s for s in (s.strip() for s in ids.split(",")) if s]
+    if not id_list:
+        return []
+    try:
+        artists = await asyncio.gather(
+            *(spotify.get_artist(aid) for aid in id_list),
+            return_exceptions=True,
+        )
+    except httpx.HTTPStatusError as e:
+        raise _upstream_to_http_error(e)
+
     return [
-        {
-            "id": str(a["id"]),
-            "name": a["name"],
-            "image_url": a.get("picture_medium") or a.get("picture"),
-            "genres": [],
-            "popularity": None,
-        }
+        _serialize_artist(a)
         for a in artists
+        if isinstance(a, dict) and a.get("id") is not None
     ]

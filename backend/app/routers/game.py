@@ -4,18 +4,19 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from .. import audio, auth, db, game as game_logic, state
 from ..models import GuessRequest, GuessResultOut, SkipRequest, SkipResultOut
+from ..rooms_helpers import room_key
 
 router = APIRouter(prefix="/rooms", tags=["game"])
 
 
-@router.post("/{code}/guess", response_model=GuessResultOut)
+@router.post("/{room_id}/guess", response_model=GuessResultOut)
 async def submit_guess(
-    code: str,
+    room_id: UUID,
     req: GuessRequest,
     user_id: UUID = Depends(auth.get_current_user_id),
 ) -> GuessResultOut:
     result = await game_logic.submit_guess(
-        code=code,
+        room_key=room_key(room_id),
         user_id=user_id,
         round_id=req.round_id,
         guessed_track_id=req.guessed_track_id,
@@ -23,25 +24,25 @@ async def submit_guess(
     return GuessResultOut(**result)
 
 
-@router.post("/{code}/skip", response_model=SkipResultOut)
+@router.post("/{room_id}/skip", response_model=SkipResultOut)
 async def submit_skip(
-    code: str,
+    room_id: UUID,
     req: SkipRequest,
     user_id: UUID = Depends(auth.get_current_user_id),
 ) -> SkipResultOut:
     result = await game_logic.submit_skip(
-        code=code, user_id=user_id, round_id=req.round_id
+        room_key=room_key(room_id), user_id=user_id, round_id=req.round_id
     )
     return SkipResultOut(**result)
 
 
-@router.get("/{code}/rounds/{round_id}/audio")
+@router.get("/{room_id}/rounds/{round_id}/audio")
 async def get_round_audio(
-    code: str,
+    room_id: UUID,
     round_id: UUID,
     user_id: UUID = Depends(auth.get_current_user_id),
 ) -> Response:
-    rg = await state.registry.get(code)
+    rg = await state.registry.get(room_key(room_id))
     if rg is None or rg.active_round is None or rg.active_round.round_id != round_id:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
@@ -92,9 +93,9 @@ async def get_round_audio(
     )
 
 
-@router.get("/{code}/rounds/{round_id}/full-audio")
+@router.get("/{room_id}/rounds/{round_id}/full-audio")
 async def get_round_full_audio(
-    code: str,
+    room_id: UUID,
     round_id: UUID,
     user_id: UUID = Depends(auth.get_current_user_id),
 ) -> Response:
@@ -110,10 +111,10 @@ async def get_round_full_audio(
             JOIN rooms r ON r.id = rnd.room_id
             JOIN room_players rp
               ON rp.room_id = r.id AND rp.user_id = $1
-            WHERE r.code = $2 AND rnd.id = $3
+            WHERE r.id = $2 AND rnd.id = $3
             """,
             user_id,
-            code,
+            room_id,
             round_id,
         )
     if row is None:

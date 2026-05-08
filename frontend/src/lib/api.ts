@@ -1,6 +1,7 @@
 import type {
   ArtistSummary,
   GuessResult,
+  PublicRoom,
   Room,
   RoomSettings,
   RoomStatus,
@@ -76,63 +77,83 @@ export const api = {
   me: () => request<User>("/me"),
 
   createRoom: () => request<Room>("/rooms", { method: "POST" }),
-  getRoom: (code: string) => request<Room>(`/rooms/${code}`),
-  joinRoom: (code: string) =>
-    request<Room>(`/rooms/${code}/join`, { method: "POST" }),
-  leaveRoom: (code: string) =>
-    request<void>(`/rooms/${code}/leave`, { method: "POST" }),
-  updateSettings: (code: string, settings: RoomSettings) =>
-    request<Room>(`/rooms/${code}/settings`, {
+  getRoom: (id: string) => request<Room>(`/rooms/${id}`),
+  joinRoom: (id: string) =>
+    request<Room>(`/rooms/${id}/join`, { method: "POST" }),
+  joinByCode: (code: string) =>
+    request<Room>(`/rooms/join-by-code`, {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    }),
+  leaveRoom: (id: string) =>
+    request<void>(`/rooms/${id}/leave`, { method: "POST" }),
+  updateSettings: (id: string, settings: RoomSettings) =>
+    request<Room>(`/rooms/${id}/settings`, {
       method: "PATCH",
       body: JSON.stringify(settings),
     }),
-  changePhase: (code: string, target: RoomStatus) =>
-    request<Room>(`/rooms/${code}/phase`, {
+  updateRoomInfo: (
+    id: string,
+    info: { name?: string | null; is_public?: boolean },
+  ) =>
+    request<Room>(`/rooms/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(info),
+    }),
+  listPublicRooms: () => request<PublicRoom[]>("/rooms/public"),
+  changePhase: (id: string, target: RoomStatus) =>
+    request<Room>(`/rooms/${id}/phase`, {
       method: "POST",
       body: JSON.stringify({ target }),
     }),
-  restart: (code: string) =>
-    request<Room>(`/rooms/${code}/restart`, { method: "POST" }),
-  promotePlayer: (code: string, userId: string) =>
-    request<Room>(`/rooms/${code}/players/${userId}/promote`, {
+  restart: (id: string) =>
+    request<Room>(`/rooms/${id}/restart`, { method: "POST" }),
+  promotePlayer: (id: string, userId: string) =>
+    request<Room>(`/rooms/${id}/players/${userId}/promote`, {
       method: "POST",
     }),
-  kickPlayer: (code: string, userId: string) =>
-    request<void>(`/rooms/${code}/players/${userId}`, { method: "DELETE" }),
+  kickPlayer: (id: string, userId: string) =>
+    request<void>(`/rooms/${id}/players/${userId}`, { method: "DELETE" }),
 
-  mySongs: (code: string) => request<SubmittedSong[]>(`/rooms/${code}/songs`),
-  submitSong: (code: string, spotifyTrackId: string) =>
-    request<SubmittedSong>(`/rooms/${code}/songs`, {
+  mySongs: (id: string) => request<SubmittedSong[]>(`/rooms/${id}/songs`),
+  submitSong: (id: string, spotifyTrackId: string) =>
+    request<SubmittedSong>(`/rooms/${id}/songs`, {
       method: "POST",
       body: JSON.stringify({ spotify_track_id: spotifyTrackId }),
     }),
-  deleteSong: (code: string, songId: string) =>
-    request<void>(`/rooms/${code}/songs/${songId}`, { method: "DELETE" }),
+  deleteSong: (id: string, songId: string) =>
+    request<void>(`/rooms/${id}/songs/${songId}`, { method: "DELETE" }),
 
-  guess: (code: string, roundId: string, guessedTrackId: string) =>
-    request<GuessResult>(`/rooms/${code}/guess`, {
+  guess: (id: string, roundId: string, guessedTrackId: string) =>
+    request<GuessResult>(`/rooms/${id}/guess`, {
       method: "POST",
       body: JSON.stringify({
         round_id: roundId,
         guessed_track_id: guessedTrackId,
       }),
     }),
-  skip: (code: string, roundId: string) =>
-    request<SkipResult>(`/rooms/${code}/skip`, {
+  skip: (id: string, roundId: string) =>
+    request<SkipResult>(`/rooms/${id}/skip`, {
       method: "POST",
       body: JSON.stringify({ round_id: roundId }),
     }),
-  results: (code: string) =>
-    request<ScoreboardEntry[]>(`/rooms/${code}/results`),
+  results: (id: string) =>
+    request<ScoreboardEntry[]>(`/rooms/${id}/results`),
 
-  spotifySearch: (q: string, roomCode?: string) => {
+  spotifySearch: (q: string, roomId?: string) => {
     const params = new URLSearchParams({ q });
-    if (roomCode) params.set("room_code", roomCode);
+    if (roomId) params.set("room_id", roomId);
     return request<SongCandidate[]>(`/spotify/search?${params}`);
   },
 
   spotifySearchArtists: (q: string) => {
     const params = new URLSearchParams({ q });
     return request<ArtistSummary[]>(`/spotify/artists/search?${params}`);
+  },
+
+  spotifyGetArtists: (ids: string[]) => {
+    if (ids.length === 0) return Promise.resolve<ArtistSummary[]>([]);
+    const params = new URLSearchParams({ ids: ids.join(",") });
+    return request<ArtistSummary[]>(`/spotify/artists?${params}`);
   },
 };

@@ -15,15 +15,66 @@
   let startError = $state<string | null>(null);
   let playerError = $state<string | null>(null);
   let copyHint = $state<string | null>(null);
+  let settingsDirty = $state(false);
+
+  let nameDraft = $state('');
+  let nameSaving = $state(false);
+  let nameError = $state<string | null>(null);
+  let visibilitySaving = $state(false);
+  let visibilityError = $state<string | null>(null);
 
   const isLeader = $derived(auth.user?.id === roomData.leader_id);
-  const shareLink = $derived(`${$page.url.origin}/room/${roomData.code}`);
+  const shareLink = $derived(`${$page.url.origin}/room/${roomData.id}`);
+
+  $effect(() => {
+    // Sync local draft when server-side name changes (and we aren't editing).
+    if (document.activeElement?.id !== 'room-name-input') {
+      nameDraft = roomData.name ?? '';
+    }
+  });
+
+  async function saveName() {
+    if ((roomData.name ?? '') === nameDraft.trim()) return;
+    nameSaving = true;
+    nameError = null;
+    try {
+      await api.updateRoomInfo(roomData.id, { name: nameDraft.trim() });
+    } catch (e) {
+      nameError = e instanceof APIError ? e.message : String(e);
+    } finally {
+      nameSaving = false;
+    }
+  }
+
+  async function toggleVisibility(e: Event) {
+    const next = (e.currentTarget as HTMLInputElement).checked;
+    visibilitySaving = true;
+    visibilityError = null;
+    try {
+      await api.updateRoomInfo(roomData.id, { is_public: next });
+    } catch (err) {
+      visibilityError = err instanceof APIError ? err.message : String(err);
+      // Revert checkbox state on failure
+      (e.currentTarget as HTMLInputElement).checked = !next;
+    } finally {
+      visibilitySaving = false;
+    }
+  }
 
   async function startSelecting() {
+    if (settingsDirty) {
+      const proceed = confirm(
+        'You have unsaved settings changes. Start anyway? Your changes will be discarded.',
+      );
+      if (!proceed) {
+        activeTab = 'settings';
+        return;
+      }
+    }
     starting = true;
     startError = null;
     try {
-      await api.changePhase(roomData.code, 'selecting');
+      await api.changePhase(roomData.id, 'selecting');
     } catch (e) {
       startError = e instanceof APIError ? e.message : String(e);
     } finally {
@@ -35,7 +86,7 @@
     if (!confirm(`Make ${username} the leader?`)) return;
     playerError = null;
     try {
-      await api.promotePlayer(roomData.code, userId);
+      await api.promotePlayer(roomData.id, userId);
     } catch (e) {
       playerError = e instanceof APIError ? e.message : String(e);
     }
@@ -45,7 +96,7 @@
     if (!confirm(`Kick ${username} from the room?`)) return;
     playerError = null;
     try {
-      await api.kickPlayer(roomData.code, userId);
+      await api.kickPlayer(roomData.id, userId);
     } catch (e) {
       playerError = e instanceof APIError ? e.message : String(e);
     }
@@ -74,21 +125,28 @@
     {#each tabs as tab (tab.id)}
       <button
         type="button"
-        class="border-b-2 px-4 py-2 text-sm font-medium transition-colors {activeTab ===
+        class="flex items-center gap-2 border-b-2 px-4 py-2 text-sm font-medium transition-colors {activeTab ===
         tab.id
           ? 'border-accent text-accent'
           : 'border-transparent text-text-secondary hover:text-text-primary'}"
         onclick={() => (activeTab = tab.id)}
       >
-        {tab.label}
+        <span>{tab.label}</span>
         {#if tab.id === 'players'}
-          <span class="ml-1 text-xs text-text-muted">({roomData.players.length})</span>
+          <span class="text-xs text-text-muted">({roomData.players.length})</span>
+        {/if}
+        {#if tab.id === 'settings' && settingsDirty}
+          <span
+            class="h-2 w-2 rounded-full bg-orange-500"
+            title="unsaved changes"
+            aria-label="unsaved changes"
+          ></span>
         {/if}
       </button>
     {/each}
   </nav>
 
-  {#if activeTab === 'players'}
+  <div class:hidden={activeTab !== 'players'}>
     <div class="grid gap-6 md:grid-cols-[2fr_1fr]">
       <div class="card">
         <h2 class="mb-3 text-lg font-semibold">
@@ -109,22 +167,91 @@
 
       <div class="card space-y-4">
         <div>
-          <p class="text-sm text-text-muted">Room code</p>
-          <div class="mt-1 flex items-center gap-2">
-            <span class="font-mono text-2xl font-bold tracking-widest text-accent">
-              {roomData.code}
-            </span>
-            <button
-              type="button"
-              class="btn-ghost text-xs"
-              onclick={() => copy(roomData.code, 'Code')}
+          <p class="text-sm text-text-muted">Room name</p>
+          {#if isLeader}
+            <form
+              class="mt-1 flex items-center gap-2"
+              onsubmit={(e) => { e.preventDefault(); saveName(); }}
             >
-              Copy
-            </button>
-          </div>
+              <input
+                id="room-name-input"
+                class="input flex-1"
+                placeholder="Untitled room"
+                maxlength="64"
+                bind:value={nameDraft}
+                disabled={nameSaving}
+                onblur={saveName}
+              />
+              {#if (roomData.name ?? '') !== nameDraft.trim()}
+                <button
+                  type="submit"
+                  class="btn-secondary text-xs"
+                  disabled={nameSaving}
+                >
+                  {nameSaving ? 'Saving…' : 'Save'}
+                </button>
+              {/if}
+            </form>
+            {#if nameError}
+              <p class="mt-1 text-xs text-danger">{nameError}</p>
+            {/if}
+          {:else}
+            <p class="mt-1 text-base text-text-primary">
+              {roomData.name ?? 'Untitled room'}
+            </p>
+          {/if}
         </div>
+
         <div>
-          <p class="text-sm text-text-muted">Invite link (one-click join)</p>
+          <label class="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={roomData.is_public}
+              disabled={!isLeader || visibilitySaving}
+              onchange={toggleVisibility}
+            />
+            <span>
+              Public
+              <span class="text-text-muted">— show in the public browser</span>
+            </span>
+          </label>
+          {#if visibilityError}
+            <p class="mt-1 text-xs text-danger">{visibilityError}</p>
+          {/if}
+        </div>
+
+        <hr class="border-border" />
+
+        {#if roomData.code}
+          <div>
+            <p class="text-sm text-text-muted">Join code</p>
+            <div class="mt-1 flex items-center gap-2">
+              <span class="font-mono text-2xl font-bold tracking-widest text-accent">
+                {roomData.code}
+              </span>
+              <button
+                type="button"
+                class="btn-ghost text-xs"
+                onclick={() => copy(roomData.code!, 'Code')}
+              >
+                Copy
+              </button>
+            </div>
+          </div>
+        {:else}
+          <div>
+            <p class="text-sm text-text-muted">Join code</p>
+            <p class="mt-1 text-sm text-text-secondary">
+              None — this room is publicly listed. Anyone signed in can join
+              from the home page browser.
+            </p>
+          </div>
+        {/if}
+
+        <div>
+          <p class="text-sm text-text-muted">
+            {roomData.is_public ? 'Direct link' : 'Invite link (one-click join)'}
+          </p>
           <div class="mt-1 flex items-center gap-2">
             <input
               class="input flex-1 truncate font-mono text-xs"
@@ -140,18 +267,24 @@
               Copy
             </button>
           </div>
-          <p class="mt-2 text-xs text-text-muted">
-            Friends opening this link will be added to the room automatically.
-          </p>
+          {#if !roomData.is_public}
+            <p class="mt-2 text-xs text-text-muted">
+              Friends opening this link will be added to the room automatically.
+            </p>
+          {/if}
         </div>
         {#if copyHint}
           <p class="text-xs text-success">{copyHint}</p>
         {/if}
       </div>
     </div>
-  {:else if activeTab === 'settings'}
-    <SettingsPanel roomData={roomData} readonly={!isLeader} />
-  {:else if activeTab === 'start'}
+  </div>
+
+  <div class:hidden={activeTab !== 'settings'}>
+    <SettingsPanel roomData={roomData} readonly={!isLeader} bind:dirty={settingsDirty} />
+  </div>
+
+  <div class:hidden={activeTab !== 'start'}>
     <div class="card space-y-4">
       <h2 class="text-lg font-semibold">Start the game</h2>
       {#if isLeader}
@@ -159,6 +292,14 @@
           Once you start, players will pick their songs in the next phase. Make
           sure your settings look right under the Settings tab.
         </p>
+        {#if settingsDirty}
+          <div class="rounded-md border border-orange-500/40 bg-orange-500/10 p-3 text-sm text-orange-500">
+            <p class="font-medium">You have unsaved settings changes.</p>
+            <p class="mt-1 text-xs">
+              Save them in the Settings tab first, or starting will discard them.
+            </p>
+          </div>
+        {/if}
         {#if startError}
           <p class="text-sm text-danger">{startError}</p>
         {/if}
@@ -176,5 +317,5 @@
         </p>
       {/if}
     </div>
-  {/if}
+  </div>
 </div>

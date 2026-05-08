@@ -28,12 +28,23 @@ export interface RoomPlayer {
 }
 
 export interface Room {
-  code: string;
+  id: string;
+  code: string | null;
+  name: string | null;
+  is_public: boolean;
   leader_id: string;
   status: RoomStatus;
   settings: RoomSettings;
   players: RoomPlayer[];
   current_round_id: string | null;
+}
+
+export interface PublicRoom {
+  id: string;
+  name: string | null;
+  leader_username: string;
+  player_count: number;
+  songs_per_player: number;
 }
 
 export interface SongCandidate {

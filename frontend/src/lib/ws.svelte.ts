@@ -33,21 +33,21 @@ class RoomConnection {
   finalScoreboard = $state<ScoreboardEntry[] | null>(null);
 
   private ws: WebSocket | null = null;
-  private code: string | null = null;
+  private roomId: string | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private wantConnected = false;
 
-  connect(code: string) {
-    if (this.code === code && this.ws) return;
+  connect(roomId: string) {
+    if (this.roomId === roomId && this.ws) return;
     this.disconnect();
-    this.code = code;
+    this.roomId = roomId;
     this.wantConnected = true;
     this._open();
   }
 
   private _open() {
-    if (!this.code || !this.wantConnected) return;
+    if (!this.roomId || !this.wantConnected) return;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     // In dev (vite on :5173), bypass vite's WS proxy and hit the backend
     // directly on :8000. Vite's WS proxy is unreliable when combined with
@@ -57,7 +57,7 @@ class RoomConnection {
     // backend share an origin via a real reverse proxy.
     const wsHost =
       location.port === "5173" ? `${location.hostname}:8000` : location.host;
-    const url = `${proto}//${wsHost}/rooms/${this.code}/ws`;
+    const url = `${proto}//${wsHost}/rooms/${this.roomId}/ws`;
     const ws = new WebSocket(url);
     this.ws = ws;
 
@@ -99,7 +99,7 @@ class RoomConnection {
     }
     this.ws?.close();
     this.ws = null;
-    this.code = null;
+    this.roomId = null;
     this.room = null;
     this.activeRound = null;
     this.bracketIndices = {};
@@ -111,9 +111,9 @@ class RoomConnection {
   }
 
   private async _refetchRoom() {
-    if (!this.code) return;
+    if (!this.roomId) return;
     try {
-      this.room = await api.getRoom(this.code);
+      this.room = await api.getRoom(this.roomId);
     } catch (e) {
       console.error("failed to refetch room", e);
     }
@@ -147,6 +147,14 @@ class RoomConnection {
 
       case "settings_updated":
         if (this.room) this.room.settings = ev.payload.settings;
+        break;
+
+      case "room_info_updated":
+        if (this.room) {
+          this.room.name = ev.payload.name ?? null;
+          this.room.is_public = !!ev.payload.is_public;
+          this.room.code = ev.payload.code ?? null;
+        }
         break;
 
       case "phase_changed":

@@ -22,7 +22,7 @@ def _decode_settings(raw) -> RoomSettings:
     return serialize_settings(raw or {})
 
 
-async def start_game(code: str) -> None:
+async def start_game(room_key: str) -> None:
     """Build the song queue, reset scores, and start the first round.
     Must be called only when transitioning into the `playing` phase.
 
@@ -34,7 +34,7 @@ async def start_game(code: str) -> None:
     it first under the shuffled order)."""
     async with db.pool().acquire() as conn:
         room = await conn.fetchrow(
-            "SELECT id, settings FROM rooms WHERE code = $1", code
+            "SELECT id, settings FROM rooms WHERE id = $1", UUID(room_key)
         )
         if room is None:
             raise HTTPException(
@@ -74,21 +74,21 @@ async def start_game(code: str) -> None:
                         queue.append(sid)
                         seen.add(sid)
 
-    game = await state.registry.get_or_create(code)
+    game = await state.registry.get_or_create(room_key)
     async with game.lock:
         game.song_queue = queue
         game.completed_round_ids = []
         game.active_round = None
 
-    await _start_next_round(code)
+    await _start_next_round(room_key)
 
 
-async def _start_next_round(code: str) -> None:
+async def _start_next_round(room_key: str) -> None:
     """Pop the next song from the queue and start a round. If empty → end game."""
-    game = await state.registry.get_or_create(code)
+    game = await state.registry.get_or_create(room_key)
     async with game.lock:
         if not game.song_queue:
-            await _end_game(code)
+            await _end_game(room_key)
             return
         next_song_id = game.song_queue.pop(0)
 
@@ -151,12 +151,12 @@ async def _start_next_round(code: str) -> None:
         if game.timeout_task is not None:
             game.timeout_task.cancel()
         game.timeout_task = asyncio.create_task(
-            _round_timeout_watcher(code, active.round_id, settings.round_max_seconds)
+            _round_timeout_watcher(room_key, active.round_id, settings.round_max_seconds)
         )
 
-    audio_url = f"/rooms/{code}/rounds/{active.round_id}/audio"
+    audio_url = f"/rooms/{room_key}/rounds/{active.round_id}/audio"
     await state.hub.broadcast(
-        code,
+        room_key,
         {
             "type": "round_started",
             "payload": {
@@ -175,12 +175,12 @@ async def _start_next_round(code: str) -> None:
 
 
 async def submit_guess(
-    code: str, user_id: UUID, round_id: UUID, guessed_track_id: str
+    room_key: str, user_id: UUID, round_id: UUID, guessed_track_id: str
 ) -> dict:
     """Apply a guess. The user picks a track from a search; we resolve its
     title/artist via Deezer and compare to the round's stored values.
     Returns dict with correct/points/bracket_index/finished."""
-    game = await state.registry.get(code)
+    game = await state.registry.get(room_key)
     if (
         game is None
         or game.active_round is None
@@ -272,7 +272,7 @@ async def submit_guess(
                 True,
                 points,
             )
-            await _broadcast_player_finished(code, active, user_id, "correct", points)
+            await _broadcast_player_finished(room_key, active, user_id, "correct", points)
         else:
             await _persist_guess(
                 round_id, user_id, bracket_index, active.brackets, guess_label, False, 0
@@ -281,11 +281,11 @@ async def submit_guess(
             if new_index >= len(active.brackets):
                 player.outcome = "exhausted"
                 player.points = 0
-                await _broadcast_player_finished(code, active, user_id, "exhausted", 0)
+                await _broadcast_player_finished(room_key, active, user_id, "exhausted", 0)
             else:
                 player.bracket_index = new_index
                 await state.hub.broadcast(
-                    code,
+                    room_key,
                     {
                         "type": "bracket_unlocked",
                         "payload": {
@@ -297,7 +297,7 @@ async def submit_guess(
                 )
 
         await _send_picker_attempt(
-            code,
+            room_key,
             active,
             user_id,
             "guess",
@@ -317,12 +317,12 @@ async def submit_guess(
         all_done = active.all_finished()
 
     if all_done:
-        await _end_round(code)
+        await _end_round(room_key)
     return result
 
 
-async def submit_skip(code: str, user_id: UUID, round_id: UUID) -> dict:
-    game = await state.registry.get(code)
+async def submit_skip(room_key: str, user_id: UUID, round_id: UUID) -> dict:
+    game = await state.registry.get(room_key)
     if (
         game is None
         or game.active_round is None
@@ -368,11 +368,11 @@ async def submit_skip(code: str, user_id: UUID, round_id: UUID) -> dict:
         if new_index >= len(active.brackets):
             player.outcome = "exhausted"
             player.points = 0
-            await _broadcast_player_finished(code, active, user_id, "exhausted", 0)
+            await _broadcast_player_finished(room_key, active, user_id, "exhausted", 0)
         else:
             player.bracket_index = new_index
             await state.hub.broadcast(
-                code,
+                room_key,
                 {
                     "type": "bracket_unlocked",
                     "payload": {
@@ -384,14 +384,14 @@ async def submit_skip(code: str, user_id: UUID, round_id: UUID) -> dict:
             )
 
         await _send_picker_attempt(
-            code, active, user_id, "skip", None, None, prev_index, False
+            room_key, active, user_id, "skip", None, None, prev_index, False
         )
 
         result = {"bracket_index": player.bracket_index, "finished": player.finished}
         all_done = active.all_finished()
 
     if all_done:
-        await _end_round(code)
+        await _end_round(room_key)
     return result
 
 
@@ -433,14 +433,14 @@ async def _persist_guess(
 
 
 async def _broadcast_player_finished(
-    code: str,
+    room_key: str,
     active: state.ActiveRound,
     user_id: UUID,
     outcome: str,
     points: int,
 ) -> None:
     await state.hub.broadcast(
-        code,
+        room_key,
         {
             "type": "player_finished",
             "payload": {
@@ -454,7 +454,7 @@ async def _broadcast_player_finished(
 
 
 async def _send_picker_attempt(
-    code: str,
+    room_key: str,
     active: state.ActiveRound,
     user_id: UUID,
     kind: str,
@@ -478,10 +478,10 @@ async def _send_picker_attempt(
     }
     message = {"type": "picker_view", "payload": payload}
     for picker_id in active.picker_ids:
-        await state.hub.send_to(code, picker_id, message)
+        await state.hub.send_to(room_key, picker_id, message)
 
 
-async def _round_timeout_watcher(code: str, round_id: UUID, timeout: float) -> None:
+async def _round_timeout_watcher(room_key: str, round_id: UUID, timeout: float) -> None:
     """Wait `timeout` seconds; if the round identified by `round_id` is still
     active, force any unfinished player to outcome=exhausted (0 pts) and end
     the round. Cancelled when the round ends naturally."""
@@ -490,7 +490,7 @@ async def _round_timeout_watcher(code: str, round_id: UUID, timeout: float) -> N
     except asyncio.CancelledError:
         return
 
-    game = await state.registry.get(code)
+    game = await state.registry.get(room_key)
     if game is None:
         return
 
@@ -506,12 +506,12 @@ async def _round_timeout_watcher(code: str, round_id: UUID, timeout: float) -> N
                 finished_users.append(uid)
 
     for uid in finished_users:
-        await _broadcast_player_finished(code, active, uid, "exhausted", 0)
-    await _end_round(code)
+        await _broadcast_player_finished(room_key, active, uid, "exhausted", 0)
+    await _end_round(room_key)
 
 
-async def _end_round(code: str) -> None:
-    game = await state.registry.get(code)
+async def _end_round(room_key: str) -> None:
+    game = await state.registry.get(room_key)
     if game is None:
         return
 
@@ -552,11 +552,10 @@ async def _end_round(code: str) -> None:
             SELECT u.id, u.username, rp.score
             FROM room_players rp
             JOIN users u ON u.id = rp.user_id
-            JOIN rooms r ON r.id = rp.room_id
-            WHERE r.code = $1
+            WHERE rp.room_id = $1
             ORDER BY rp.score DESC, u.username ASC
             """,
-            code,
+            UUID(room_key),
         )
 
     scoreboard = [
@@ -568,17 +567,17 @@ async def _end_round(code: str) -> None:
         for r in scoreboard_rows
     ]
 
-    settings = await _load_settings(code)
+    settings = await _load_settings(room_key)
     intermission = settings.round_intermission_seconds if settings else 6
     is_last_round = not game.song_queue
 
     full_audio_url = (
-        f"/rooms/{code}/rounds/{active.round_id}/full-audio"
+        f"/rooms/{room_key}/rounds/{active.round_id}/full-audio"
         if active.preview_url
         else None
     )
     await state.hub.broadcast(
-        code,
+        room_key,
         {
             "type": "round_ended",
             "payload": {
@@ -595,37 +594,38 @@ async def _end_round(code: str) -> None:
     )
 
     if is_last_round:
-        await _end_game(code)
+        await _end_game(room_key)
     else:
         if intermission > 0:
             await asyncio.sleep(intermission)
-        await _start_next_round(code)
+        await _start_next_round(room_key)
 
 
-async def _load_settings(code: str):
+async def _load_settings(room_key: str):
     async with db.pool().acquire() as conn:
-        row = await conn.fetchrow("SELECT settings FROM rooms WHERE code = $1", code)
+        row = await conn.fetchrow(
+            "SELECT settings FROM rooms WHERE id = $1", UUID(room_key)
+        )
     if row is None:
         return None
     return _decode_settings(row["settings"])
 
 
-async def _end_game(code: str) -> None:
+async def _end_game(room_key: str) -> None:
     async with db.pool().acquire() as conn:
         await conn.execute(
-            "UPDATE rooms SET status = 'results', ended_at = NOW() WHERE code = $1",
-            code,
+            "UPDATE rooms SET status = 'results', ended_at = NOW() WHERE id = $1",
+            UUID(room_key),
         )
         scoreboard_rows = await conn.fetch(
             """
             SELECT u.id, u.username, rp.score
             FROM room_players rp
             JOIN users u ON u.id = rp.user_id
-            JOIN rooms r ON r.id = rp.room_id
-            WHERE r.code = $1
+            WHERE rp.room_id = $1
             ORDER BY rp.score DESC, u.username ASC
             """,
-            code,
+            UUID(room_key),
         )
 
     scoreboard = [
@@ -633,7 +633,7 @@ async def _end_game(code: str) -> None:
         for r in scoreboard_rows
     ]
     await state.hub.broadcast(
-        code,
+        room_key,
         {
             "type": "game_ended",
             "payload": {
@@ -644,11 +644,12 @@ async def _end_game(code: str) -> None:
     )
 
 
-async def restart_game(code: str) -> None:
+async def restart_game(room_key: str) -> None:
     """Reset scores, songs, and rounds for a room and return to the lobby phase."""
+    room_id = UUID(room_key)
     async with db.pool().acquire() as conn:
         async with conn.transaction():
-            room = await conn.fetchrow("SELECT id FROM rooms WHERE code = $1", code)
+            room = await conn.fetchrow("SELECT id FROM rooms WHERE id = $1", room_id)
             if room is None:
                 return
             await conn.execute(
@@ -666,7 +667,7 @@ async def restart_game(code: str) -> None:
                 "WHERE id = $1",
                 room["id"],
             )
-    existing = await state.registry.get(code)
+    existing = await state.registry.get(room_key)
     if existing is not None and existing.timeout_task is not None:
         existing.timeout_task.cancel()
-    await state.registry.remove(code)
+    await state.registry.remove(room_key)

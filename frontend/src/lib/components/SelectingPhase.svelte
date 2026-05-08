@@ -36,7 +36,7 @@
     searching = true;
     error = null;
     try {
-      results = await api.spotifySearch(q, roomData.code);
+      results = await api.spotifySearch(q, roomData.id);
     } catch (e) {
       error = e instanceof APIError ? e.message : String(e);
     } finally {
@@ -46,7 +46,7 @@
 
   async function loadMine() {
     try {
-      mySongs = await api.mySongs(roomData.code);
+      mySongs = await api.mySongs(roomData.id);
     } catch (e) {
       console.error('failed to load my songs', e);
     }
@@ -60,7 +60,7 @@
     submitting = track.spotify_track_id;
     error = null;
     try {
-      await api.submitSong(roomData.code, track.spotify_track_id);
+      await api.submitSong(roomData.id, track.spotify_track_id);
       await loadMine();
     } catch (e) {
       error = e instanceof APIError ? e.message : String(e);
@@ -71,7 +71,7 @@
 
   async function remove(songId: string) {
     try {
-      await api.deleteSong(roomData.code, songId);
+      await api.deleteSong(roomData.id, songId);
       await loadMine();
     } catch (e) {
       error = e instanceof APIError ? e.message : String(e);
@@ -82,7 +82,7 @@
     starting = true;
     error = null;
     try {
-      await api.changePhase(roomData.code, 'playing');
+      await api.changePhase(roomData.id, 'playing');
     } catch (e) {
       error = e instanceof APIError ? e.message : String(e);
     } finally {

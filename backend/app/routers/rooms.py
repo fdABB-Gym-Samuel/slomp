@@ -6,7 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from .. import auth, db, game, spotify, state
 from ..models import (
+    JoinByCodeRequest,
     PhaseRequest,
+    PublicRoomOut,
+    RoomInfoUpdate,
     RoomOut,
     RoomSettings,
     SubmitSongRequest,
@@ -19,59 +22,100 @@ from ..rooms_helpers import (
     build_room_out,
     fetch_room_out,
     generate_room_code,
+    load_room_by_code_or_404,
     load_room_or_404,
+    room_key,
 )
 
 router = APIRouter(prefix="/rooms", tags=["rooms"])
+
+
+async def _generate_unique_code(conn: asyncpg.Connection) -> str:
+    for _ in range(20):
+        code = generate_room_code()
+        exists = await conn.fetchval(
+            "SELECT 1 FROM rooms WHERE code = $1", code
+        )
+        if not exists:
+            return code
+    raise HTTPException(
+        status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail={
+            "code": "room_code_collision",
+            "message": "could not generate a unique room code",
+        },
+    )
 
 
 @router.post("", status_code=201, response_model=RoomOut)
 async def create_room(user_id: UUID = Depends(auth.get_current_user_id)) -> RoomOut:
     async with db.pool().acquire() as conn:
         async with conn.transaction():
-            for _ in range(10):
-                code = generate_room_code()
-                try:
-                    await conn.execute(
-                        "INSERT INTO rooms (code, leader_id) VALUES ($1, $2)",
-                        code,
-                        user_id,
-                    )
-                    break
-                except asyncpg.UniqueViolationError:
-                    continue
-            else:
-                raise HTTPException(
-                    status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail={
-                        "code": "room_code_collision",
-                        "message": "could not generate a unique room code",
-                    },
-                )
-            await conn.execute(
-                "INSERT INTO room_players (room_id, user_id) "
-                "VALUES ((SELECT id FROM rooms WHERE code = $1), $2)",
+            code = await _generate_unique_code(conn)
+            room_id = await conn.fetchval(
+                "INSERT INTO rooms (code, leader_id) VALUES ($1, $2) RETURNING id",
                 code,
                 user_id,
             )
-            room = await load_room_or_404(conn, code)
+            await conn.execute(
+                "INSERT INTO room_players (room_id, user_id) VALUES ($1, $2)",
+                room_id,
+                user_id,
+            )
+            room = await load_room_or_404(conn, room_id)
             return await build_room_out(conn, room)
 
 
-@router.get("/{code}", response_model=RoomOut)
-async def get_room(
-    code: str, user_id: UUID = Depends(auth.get_current_user_id)
-) -> RoomOut:
-    return await fetch_room_out(code)
+@router.get("/public", response_model=list[PublicRoomOut])
+async def list_public_rooms(
+    user_id: UUID = Depends(auth.get_current_user_id),
+) -> list[PublicRoomOut]:
+    async with db.pool().acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                r.id,
+                r.name,
+                u.username AS leader_username,
+                (
+                    SELECT count(*)::int FROM room_players rp
+                     WHERE rp.room_id = r.id
+                ) AS player_count,
+                r.settings
+            FROM rooms r
+            JOIN users u ON u.id = r.leader_id
+            WHERE r.is_public AND r.status = 'lobby'
+            ORDER BY r.created_at DESC
+            LIMIT 100
+            """
+        )
+    out: list[PublicRoomOut] = []
+    for r in rows:
+        raw = r["settings"]
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        spp = (raw or {}).get("songs_per_player", 3)
+        out.append(
+            PublicRoomOut(
+                id=r["id"],
+                name=r["name"],
+                leader_username=r["leader_username"],
+                player_count=r["player_count"],
+                songs_per_player=spp,
+            )
+        )
+    return out
 
 
-@router.post("/{code}/join", response_model=RoomOut)
-async def join_room(
-    code: str, user_id: UUID = Depends(auth.get_current_user_id)
+@router.post("/join-by-code", response_model=RoomOut)
+async def join_by_code(
+    req: JoinByCodeRequest,
+    user_id: UUID = Depends(auth.get_current_user_id),
 ) -> RoomOut:
+    code = req.code.strip().upper()
     async with db.pool().acquire() as conn:
         async with conn.transaction():
-            room = await load_room_or_404(conn, code)
+            room = await load_room_by_code_or_404(conn, code)
             if room["status"] != "lobby":
                 raise HTTPException(
                     status.HTTP_409_CONFLICT,
@@ -89,13 +133,116 @@ async def join_room(
             return await build_room_out(conn, room)
 
 
-@router.post("/{code}/leave", status_code=204)
-async def leave_room(
-    code: str, user_id: UUID = Depends(auth.get_current_user_id)
-) -> Response:
+@router.get("/{room_id}", response_model=RoomOut)
+async def get_room(
+    room_id: UUID, user_id: UUID = Depends(auth.get_current_user_id)
+) -> RoomOut:
+    return await fetch_room_out(room_id)
+
+
+@router.patch("/{room_id}", response_model=RoomOut)
+async def update_room_info(
+    room_id: UUID,
+    req: RoomInfoUpdate,
+    user_id: UUID = Depends(auth.get_current_user_id),
+) -> RoomOut:
     async with db.pool().acquire() as conn:
         async with conn.transaction():
-            room = await load_room_or_404(conn, code)
+            room = await load_room_or_404(conn, room_id)
+            await assert_leader(room, user_id)
+            await assert_status(room, "lobby")
+
+            sets: list[str] = []
+            args: list = []
+            if req.name is not None:
+                trimmed = req.name.strip()
+                sets.append(f"name = ${len(args) + 1}")
+                args.append(trimmed if trimmed else None)
+            if req.is_public is not None and req.is_public != room["is_public"]:
+                sets.append(f"is_public = ${len(args) + 1}")
+                args.append(req.is_public)
+                # Public rooms have no join code (they're discoverable via the
+                # browser). Toggling back to private mints a fresh one so any
+                # previously-shared code is invalidated.
+                if req.is_public:
+                    sets.append(f"code = ${len(args) + 1}")
+                    args.append(None)
+                else:
+                    new_code = await _generate_unique_code(conn)
+                    sets.append(f"code = ${len(args) + 1}")
+                    args.append(new_code)
+
+            if sets:
+                args.append(room["id"])
+                await conn.execute(
+                    f"UPDATE rooms SET {', '.join(sets)} WHERE id = ${len(args)}",
+                    *args,
+                )
+                room = await load_room_or_404(conn, room_id)
+            out = await build_room_out(conn, room)
+
+    await state.hub.broadcast(
+        room_key(room),
+        {
+            "type": "room_info_updated",
+            "payload": {
+                "name": out.name,
+                "is_public": out.is_public,
+                "code": out.code,
+            },
+        },
+    )
+    return out
+
+
+@router.post("/{room_id}/join", response_model=RoomOut)
+async def join_room(
+    room_id: UUID, user_id: UUID = Depends(auth.get_current_user_id)
+) -> RoomOut:
+    async with db.pool().acquire() as conn:
+        async with conn.transaction():
+            room = await load_room_or_404(conn, room_id)
+            if room["status"] != "lobby":
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "room_in_progress",
+                        "message": "room is no longer in lobby phase",
+                    },
+                )
+            # Joining by id (e.g. clicking through from the public list) is
+            # only allowed on public rooms; private rooms must be joined with
+            # their code via /rooms/join-by-code.
+            is_member = await conn.fetchval(
+                "SELECT 1 FROM room_players WHERE room_id = $1 AND user_id = $2",
+                room["id"],
+                user_id,
+            )
+            if not is_member and not room["is_public"]:
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN,
+                    detail={
+                        "code": "private_room",
+                        "message": "this room is private; join with its code",
+                    },
+                )
+            await conn.execute(
+                "INSERT INTO room_players (room_id, user_id) VALUES ($1, $2) "
+                "ON CONFLICT DO NOTHING",
+                room["id"],
+                user_id,
+            )
+            return await build_room_out(conn, room)
+
+
+@router.post("/{room_id}/leave", status_code=204)
+async def leave_room(
+    room_id: UUID, user_id: UUID = Depends(auth.get_current_user_id)
+) -> Response:
+    key = room_key(room_id)
+    async with db.pool().acquire() as conn:
+        async with conn.transaction():
+            room = await load_room_or_404(conn, room_id)
             await conn.execute(
                 "DELETE FROM room_players WHERE room_id = $1 AND user_id = $2",
                 room["id"],
@@ -107,7 +254,7 @@ async def leave_room(
             )
             if remaining == 0:
                 await conn.execute("DELETE FROM rooms WHERE id = $1", room["id"])
-                await state.registry.remove(code)
+                await state.registry.remove(key)
             elif room["leader_id"] == user_id:
                 # Leadership passes to the earliest remaining joiner
                 new_leader = await conn.fetchval(
@@ -122,15 +269,15 @@ async def leave_room(
                 )
 
     await state.hub.broadcast(
-        code,
+        key,
         {"type": "player_left", "payload": {"user_id": str(user_id)}},
     )
     return Response(status_code=204)
 
 
-@router.patch("/{code}/settings", response_model=RoomOut)
+@router.patch("/{room_id}/settings", response_model=RoomOut)
 async def update_settings(
-    code: str,
+    room_id: UUID,
     new_settings: RoomSettings,
     user_id: UUID = Depends(auth.get_current_user_id),
 ) -> RoomOut:
@@ -154,7 +301,7 @@ async def update_settings(
 
     async with db.pool().acquire() as conn:
         async with conn.transaction():
-            room = await load_room_or_404(conn, code)
+            room = await load_room_or_404(conn, room_id)
             await assert_leader(room, user_id)
             await assert_status(room, "lobby")
             await conn.execute(
@@ -162,11 +309,11 @@ async def update_settings(
                 json.dumps(new_settings.model_dump()),
                 room["id"],
             )
-            room = await load_room_or_404(conn, code)
+            room = await load_room_or_404(conn, room_id)
             out = await build_room_out(conn, room)
 
     await state.hub.broadcast(
-        code,
+        room_key(room),
         {
             "type": "settings_updated",
             "payload": {"settings": new_settings.model_dump()},
@@ -175,9 +322,9 @@ async def update_settings(
     return out
 
 
-@router.post("/{code}/phase", response_model=RoomOut)
+@router.post("/{room_id}/phase", response_model=RoomOut)
 async def change_phase(
-    code: str,
+    room_id: UUID,
     req: PhaseRequest,
     user_id: UUID = Depends(auth.get_current_user_id),
 ) -> RoomOut:
@@ -185,7 +332,7 @@ async def change_phase(
 
     async with db.pool().acquire() as conn:
         async with conn.transaction():
-            room = await load_room_or_404(conn, code)
+            room = await load_room_or_404(conn, room_id)
             await assert_leader(room, user_id)
 
             current = room["status"]
@@ -243,29 +390,30 @@ async def change_phase(
                 target,
                 room["id"],
             )
-            room = await load_room_or_404(conn, code)
+            room = await load_room_or_404(conn, room_id)
             out = await build_room_out(conn, room)
 
+    key = room_key(room)
     await state.hub.broadcast(
-        code,
+        key,
         {"type": "phase_changed", "payload": {"status": target}},
     )
 
     if target == "playing":
-        await game.start_game(code)
+        await game.start_game(key)
 
     return out
 
 
-@router.post("/{code}/players/{target_user_id}/promote", response_model=RoomOut)
+@router.post("/{room_id}/players/{target_user_id}/promote", response_model=RoomOut)
 async def promote_player(
-    code: str,
+    room_id: UUID,
     target_user_id: UUID,
     user_id: UUID = Depends(auth.get_current_user_id),
 ) -> RoomOut:
     async with db.pool().acquire() as conn:
         async with conn.transaction():
-            room = await load_room_or_404(conn, code)
+            room = await load_room_or_404(conn, room_id)
             await assert_leader(room, user_id)
             await assert_status(room, "lobby")
             if target_user_id == user_id:
@@ -294,25 +442,25 @@ async def promote_player(
                 target_user_id,
                 room["id"],
             )
-            room = await load_room_or_404(conn, code)
+            room = await load_room_or_404(conn, room_id)
             out = await build_room_out(conn, room)
 
     await state.hub.broadcast(
-        code,
+        room_key(room),
         {"type": "leader_changed", "payload": {"leader_id": str(target_user_id)}},
     )
     return out
 
 
-@router.delete("/{code}/players/{target_user_id}", status_code=204)
+@router.delete("/{room_id}/players/{target_user_id}", status_code=204)
 async def kick_player(
-    code: str,
+    room_id: UUID,
     target_user_id: UUID,
     user_id: UUID = Depends(auth.get_current_user_id),
 ) -> Response:
     async with db.pool().acquire() as conn:
         async with conn.transaction():
-            room = await load_room_or_404(conn, code)
+            room = await load_room_or_404(conn, room_id)
             await assert_leader(room, user_id)
             await assert_status(room, "lobby")
             if target_user_id == user_id:
@@ -338,26 +486,27 @@ async def kick_player(
                 )
 
     await state.hub.broadcast(
-        code,
+        room_key(room),
         {"type": "player_kicked", "payload": {"user_id": str(target_user_id)}},
     )
     return Response(status_code=204)
 
 
-@router.post("/{code}/restart", response_model=RoomOut)
+@router.post("/{room_id}/restart", response_model=RoomOut)
 async def restart_room(
-    code: str, user_id: UUID = Depends(auth.get_current_user_id)
+    room_id: UUID, user_id: UUID = Depends(auth.get_current_user_id)
 ) -> RoomOut:
     async with db.pool().acquire() as conn:
-        room = await load_room_or_404(conn, code)
+        room = await load_room_or_404(conn, room_id)
         await assert_leader(room, user_id)
         await assert_status(room, "results")
 
-    await game.restart_game(code)
+    key = room_key(room)
+    await game.restart_game(key)
 
-    out = await fetch_room_out(code)
+    out = await fetch_room_out(room_id)
     await state.hub.broadcast(
-        code,
+        key,
         {"type": "phase_changed", "payload": {"status": "lobby"}},
     )
     return out
@@ -366,12 +515,12 @@ async def restart_room(
 # ---------- songs ---------------------------------------------------------
 
 
-@router.get("/{code}/songs", response_model=list[SubmittedSongOut])
+@router.get("/{room_id}/songs", response_model=list[SubmittedSongOut])
 async def my_songs(
-    code: str, user_id: UUID = Depends(auth.get_current_user_id)
+    room_id: UUID, user_id: UUID = Depends(auth.get_current_user_id)
 ) -> list[SubmittedSongOut]:
     async with db.pool().acquire() as conn:
-        room = await load_room_or_404(conn, code)
+        room = await load_room_or_404(conn, room_id)
         rows = await conn.fetch(
             """
             SELECT rs.id, rs.spotify_track_id, rs.title, rs.artist,
@@ -387,14 +536,14 @@ async def my_songs(
     return [SubmittedSongOut(**dict(r)) for r in rows]
 
 
-@router.post("/{code}/songs", status_code=201, response_model=SubmittedSongOut)
+@router.post("/{room_id}/songs", status_code=201, response_model=SubmittedSongOut)
 async def submit_song(
-    code: str,
+    room_id: UUID,
     req: SubmitSongRequest,
     user_id: UUID = Depends(auth.get_current_user_id),
 ) -> SubmittedSongOut:
     async with db.pool().acquire() as conn:
-        room = await load_room_or_404(conn, code)
+        room = await load_room_or_404(conn, room_id)
         await assert_status(room, "selecting")
 
         settings = RoomSettings.model_validate(
@@ -488,7 +637,7 @@ async def submit_song(
                 )
 
     await state.hub.broadcast(
-        code,
+        room_key(room),
         {
             "type": "song_submitted",
             "payload": {"user_id": str(user_id), "count": already + 1},
@@ -497,15 +646,15 @@ async def submit_song(
     return SubmittedSongOut(**dict(row))
 
 
-@router.delete("/{code}/songs/{song_id}", status_code=204)
+@router.delete("/{room_id}/songs/{song_id}", status_code=204)
 async def delete_song(
-    code: str,
+    room_id: UUID,
     song_id: UUID,
     user_id: UUID = Depends(auth.get_current_user_id),
 ) -> Response:
     async with db.pool().acquire() as conn:
         async with conn.transaction():
-            room = await load_room_or_404(conn, code)
+            room = await load_room_or_404(conn, room_id)
             await assert_status(room, "selecting")
             deleted = await conn.execute(
                 "DELETE FROM room_song_pickers "
@@ -540,12 +689,12 @@ async def delete_song(
 # ---------- results -------------------------------------------------------
 
 
-@router.get("/{code}/results")
+@router.get("/{room_id}/results")
 async def get_results(
-    code: str, user_id: UUID = Depends(auth.get_current_user_id)
+    room_id: UUID, user_id: UUID = Depends(auth.get_current_user_id)
 ) -> list[dict]:
     async with db.pool().acquire() as conn:
-        room = await load_room_or_404(conn, code)
+        room = await load_room_or_404(conn, room_id)
         if room["status"] != "results":
             raise HTTPException(
                 status.HTTP_409_CONFLICT,

@@ -53,7 +53,10 @@ class RoomPlayerOut(BaseModel):
 
 
 class RoomOut(BaseModel):
-    code: str
+    id: UUID
+    code: str | None = None
+    name: str | None = None
+    is_public: bool = False
     leader_id: UUID
     status: RoomStatus
     settings: RoomSettings
@@ -63,6 +66,23 @@ class RoomOut(BaseModel):
 
 class PhaseRequest(BaseModel):
     target: RoomStatus
+
+
+class RoomInfoUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=64)
+    is_public: bool | None = None
+
+
+class JoinByCodeRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=8)
+
+
+class PublicRoomOut(BaseModel):
+    id: UUID
+    name: str | None
+    leader_username: str
+    player_count: int
+    songs_per_player: int
 
 
 # ---------- songs ---------------------------------------------------------

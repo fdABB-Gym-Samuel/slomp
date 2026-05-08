@@ -18,18 +18,18 @@
       goto('/login');
       return;
     }
-    const code = $page.params.code;
-    if (!code) {
-      connectError = 'missing room code';
+    const id = $page.params.id;
+    if (!id) {
+      connectError = 'missing room id';
       return;
     }
     try {
-      const existing = await api.getRoom(code);
+      const existing = await api.getRoom(id);
       const isMember = existing.players.some((p) => p.user.id === auth.user!.id);
       if (!isMember) {
-        await api.joinRoom(code);
+        await api.joinRoom(id);
       }
-      room.connect(code);
+      room.connect(id);
     } catch (e) {
       connectError = e instanceof APIError ? e.message : String(e);
     }

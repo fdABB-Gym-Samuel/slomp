@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { SvelteSet } from 'svelte/reactivity';
   import { api, APIError } from '$lib/api';
   import type { ArtistSummary } from '$lib/types';
 
@@ -17,8 +18,29 @@
 
   // Cache id → ArtistSummary so we can render chips for selected ids.
   let cache = $state<Record<string, ArtistSummary>>({});
+  // Track ids we've already requested so we don't refetch on every effect run.
+  let requested = new SvelteSet<string>();
 
   let timer: ReturnType<typeof setTimeout> | null = null;
+
+  // When `selected` contains ids we've never seen (e.g. settings loaded
+  // from the server after a reload or game restart), fetch their details
+  // so the chips render with names/images instead of truncated ids.
+  $effect(() => {
+    const missing = selected.filter(
+      (id) => !cache[id] && !requested.has(id),
+    );
+    if (missing.length === 0) return;
+    for (const id of missing) requested.add(id);
+    api
+      .spotifyGetArtists(missing)
+      .then((artists) => {
+        for (const a of artists) cache[a.id] = a;
+      })
+      .catch(() => {
+        for (const id of missing) requested.delete(id);
+      });
+  });
 
   function onInput() {
     if (timer) clearTimeout(timer);
