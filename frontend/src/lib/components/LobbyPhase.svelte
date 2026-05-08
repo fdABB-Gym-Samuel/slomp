@@ -24,7 +24,11 @@
   let visibilityError = $state<string | null>(null);
 
   const isLeader = $derived(auth.user?.id === roomData.leader_id);
-  const shareLink = $derived(`${$page.url.origin}/room/${roomData.id}`);
+  const shareLink = $derived(
+    roomData.code
+      ? `${$page.url.origin}/room/${roomData.id}?code=${roomData.code}`
+      : `${$page.url.origin}/room/${roomData.id}`,
+  );
 
   $effect(() => {
     // Sync local draft when server-side name changes (and we aren't editing).

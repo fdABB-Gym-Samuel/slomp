@@ -24,6 +24,7 @@
   let myAttempts = $state<LocalAttempt[]>([]);
   let submitting = $state(false);
   let error = $state<string | null>(null);
+  let showMatchingHelp = $state(false);
 
   let audio: HTMLAudioElement | null = $state(null);
   let playing = $state(false);
@@ -468,13 +469,44 @@
 
         {#if !myFinished}
           <div class="card space-y-3">
-            <input
-              class="input"
-              placeholder="Search the song you think it is…"
-              bind:value={query}
-              oninput={onQueryInput}
-              disabled={submitting}
-            />
+            <div class="flex items-center gap-2">
+              <input
+                class="input flex-1"
+                placeholder="Search the song you think it is…"
+                bind:value={query}
+                oninput={onQueryInput}
+                disabled={submitting}
+              />
+              <button
+                type="button"
+                class="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full border border-border text-sm font-semibold text-text-secondary hover:bg-surface-raised"
+                onclick={() => (showMatchingHelp = !showMatchingHelp)}
+                aria-label="How are guesses matched?"
+                aria-expanded={showMatchingHelp}
+              >
+                ?
+              </button>
+            </div>
+            {#if showMatchingHelp}
+              <div
+                class="rounded-md border border-border bg-surface-raised p-3 text-xs text-text-secondary"
+              >
+                <p class="mb-1 font-semibold text-text-primary">
+                  How guesses are matched
+                </p>
+                <p>
+                  A guess counts when both the <strong>title</strong> and
+                  <strong>artist</strong> match the picked track. Comparison is
+                  case-insensitive and ignores punctuation, so different
+                  remasters / radio edits / live versions all count as the same
+                  song. Parenthetical sections like
+                  <em>(Remastered 2009)</em>
+                  and <em>feat.</em> credits are stripped before comparing.
+                  Different songs sharing a title (e.g. Adele's “Hello” vs.
+                  Lionel Richie's) won't match because the artist differs.
+                </p>
+              </div>
+            {/if}
             {#if searching}
               <p class="text-xs text-text-muted">searching…</p>
             {/if}

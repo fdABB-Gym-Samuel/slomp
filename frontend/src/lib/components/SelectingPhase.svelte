@@ -29,7 +29,7 @@
 
   async function runSearch() {
     const q = query.trim();
-    if (q.length < 2) {
+    if (q.length < 1) {
       results = [];
       return;
     }

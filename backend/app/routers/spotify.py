@@ -42,8 +42,32 @@ async def search(
                 raw = json.loads(raw)
             rules = RoomSettings.model_validate(raw or {}).model_dump()
 
+    required_ids: list[str] = []
+    if rules is not None:
+        required_ids = [a for a in (rules.get("required_artists") or []) if a]
+
     try:
-        tracks = await spotify.search_tracks(q, limit=limit)
+        if required_ids:
+            # Resolve required IDs → names and run one Deezer search per
+            # artist with the name appended free-text to the user's query
+            # (e.g. `q=lucky Daft Punk`). Deezer's relevance puts the real
+            # artist on top; `matches_rules` below then strips covers /
+            # tributes / look-alikes by ID. We re-rank merged results
+            # ourselves so the artist's real tracks lead, regardless of
+            # which artist's batch they came from.
+            artist_lookups = await asyncio.gather(
+                *(spotify.get_artist(aid) for aid in required_ids),
+                return_exceptions=True,
+            )
+            artist_names = [
+                a["name"]
+                for a in artist_lookups
+                if isinstance(a, dict) and a.get("name")
+            ]
+            tracks = await spotify.search_tracks_for_artists(q, artist_names)
+            tracks.sort(key=lambda t: spotify.relevance_score(t, q), reverse=True)
+        else:
+            tracks = await spotify.search_tracks(q, limit=limit)
     except httpx.HTTPStatusError as e:
         raise _upstream_to_http_error(e)
 
@@ -54,6 +78,8 @@ async def search(
             if not ok:
                 continue
         out.append(SongCandidate.model_validate(spotify.serialize_candidate(t)))
+        if len(out) >= limit:
+            break
     return out
 
 

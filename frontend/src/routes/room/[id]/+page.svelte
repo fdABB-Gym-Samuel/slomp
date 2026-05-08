@@ -23,11 +23,23 @@
       connectError = 'missing room id';
       return;
     }
+    const code = $page.url.searchParams.get('code');
     try {
       const existing = await api.getRoom(id);
       const isMember = existing.players.some((p) => p.user.id === auth.user!.id);
       if (!isMember) {
-        await api.joinRoom(id);
+        // Private rooms only accept join-by-id from existing members; use the
+        // code from the share link to admit a first-time joiner.
+        if (code) {
+          await api.joinByCode(code);
+        } else {
+          await api.joinRoom(id);
+        }
+      }
+      if (code) {
+        // Strip the code from the URL so it doesn't linger in history/refreshes.
+        const cleanUrl = `${$page.url.pathname}${$page.url.hash}`;
+        history.replaceState(history.state, '', cleanUrl);
       }
       room.connect(id);
     } catch (e) {

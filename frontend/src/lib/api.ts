@@ -137,8 +137,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ round_id: roundId }),
     }),
-  results: (id: string) =>
-    request<ScoreboardEntry[]>(`/rooms/${id}/results`),
+  results: (id: string) => request<ScoreboardEntry[]>(`/rooms/${id}/results`),
 
   spotifySearch: (q: string, roomId?: string) => {
     const params = new URLSearchParams({ q });

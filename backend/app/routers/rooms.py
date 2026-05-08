@@ -33,9 +33,7 @@ router = APIRouter(prefix="/rooms", tags=["rooms"])
 async def _generate_unique_code(conn: asyncpg.Connection) -> str:
     for _ in range(20):
         code = generate_room_code()
-        exists = await conn.fetchval(
-            "SELECT 1 FROM rooms WHERE code = $1", code
-        )
+        exists = await conn.fetchval("SELECT 1 FROM rooms WHERE code = $1", code)
         if not exists:
             return code
     raise HTTPException(
@@ -116,14 +114,10 @@ async def join_by_code(
     async with db.pool().acquire() as conn:
         async with conn.transaction():
             room = await load_room_by_code_or_404(conn, code)
-            if room["status"] != "lobby":
-                raise HTTPException(
-                    status.HTTP_409_CONFLICT,
-                    detail={
-                        "code": "room_in_progress",
-                        "message": "room is no longer in lobby phase",
-                    },
-                )
+            # Late joiners are allowed at any phase. They start with score 0,
+            # are excluded from the in-flight round (not in active_round.players),
+            # and join the next round naturally when _start_next_round rebuilds
+            # players from the DB.
             await conn.execute(
                 "INSERT INTO room_players (room_id, user_id) VALUES ($1, $2) "
                 "ON CONFLICT DO NOTHING",
@@ -202,17 +196,11 @@ async def join_room(
     async with db.pool().acquire() as conn:
         async with conn.transaction():
             room = await load_room_or_404(conn, room_id)
-            if room["status"] != "lobby":
-                raise HTTPException(
-                    status.HTTP_409_CONFLICT,
-                    detail={
-                        "code": "room_in_progress",
-                        "message": "room is no longer in lobby phase",
-                    },
-                )
             # Joining by id (e.g. clicking through from the public list) is
             # only allowed on public rooms; private rooms must be joined with
-            # their code via /rooms/join-by-code.
+            # their code via /rooms/join-by-code. Late joiners (room past
+            # lobby phase) are allowed: they start with score 0, sit out the
+            # in-flight round, and join the next round naturally.
             is_member = await conn.fetchval(
                 "SELECT 1 FROM room_players WHERE room_id = $1 AND user_id = $2",
                 room["id"],

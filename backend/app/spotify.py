@@ -15,6 +15,7 @@ The module name is unchanged to minimise churn elsewhere — column names and
 fields like `spotify_track_id` now hold Deezer integer IDs (as strings).
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -52,6 +53,66 @@ async def _api_get(path: str, params: dict | None = None) -> Any:
 async def search_tracks(query: str, limit: int = 10) -> list[dict]:
     data = await _api_get("/search", {"q": query, "limit": limit})
     return data.get("data", [])
+
+
+async def search_tracks_for_artists(
+    query: str, artist_names: list[str], limit_per_artist: int = 25
+) -> list[dict]:
+    """Run one Deezer search per required artist with the artist name
+    appended free-text to the query (`q=<query> <name>`), then merge unique
+    tracks. We don't use Deezer's `artist:"<name>"` advanced filter because
+    its name match is token-based and fuzzy — `artist:"Daft Punk"` happily
+    returns tracks by "Pan Da Punk". Free-text concatenation lets Deezer's
+    own relevance rank the real artist first; the caller still strips
+    look-alikes by ID via `matches_rules`."""
+    if not artist_names:
+        return []
+
+    async def _one(name: str) -> list[dict]:
+        scoped = f"{query} {name}".strip()
+        if not scoped:
+            return []
+        try:
+            return await search_tracks(scoped, limit=limit_per_artist)
+        except httpx.HTTPStatusError as e:
+            logger.warning("artist-scoped search failed for %r: %s", name, e)
+            return []
+
+    batches = await asyncio.gather(*(_one(n) for n in artist_names))
+    merged: dict[Any, dict] = {}
+    for batch in batches:
+        for t in batch:
+            tid = t.get("id")
+            if tid is not None and tid not in merged:
+                merged[tid] = t
+    return list(merged.values())
+
+
+def relevance_score(track: dict, query: str) -> float:
+    """Score a Deezer track against the user's query for our own ranking.
+    Deezer's relevance collapses once you add an `artist:` filter, so the
+    merged-search path needs to re-rank with title/token overlap and use
+    `rank` only as a tiebreaker."""
+    q = (query or "").strip().lower()
+    title = (track.get("title") or "").lower()
+    artist_name = ((track.get("artist") or {}).get("name") or "").lower()
+    score = 0.0
+    if q:
+        if title == q:
+            score += 100.0
+        elif title.startswith(q):
+            score += 60.0
+        elif q in title:
+            score += 35.0
+        q_tokens = set(q.split())
+        if q_tokens:
+            t_tokens = set(title.split())
+            score += 25.0 * len(q_tokens & t_tokens) / len(q_tokens)
+        if q in artist_name:
+            score += 5.0
+    rank = track.get("rank") or 0
+    score += rank / 1_000_000.0
+    return score
 
 
 async def search_artists(query: str, limit: int = 10) -> list[dict]:

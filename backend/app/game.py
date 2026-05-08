@@ -151,7 +151,9 @@ async def _start_next_round(room_key: str) -> None:
         if game.timeout_task is not None:
             game.timeout_task.cancel()
         game.timeout_task = asyncio.create_task(
-            _round_timeout_watcher(room_key, active.round_id, settings.round_max_seconds)
+            _round_timeout_watcher(
+                room_key, active.round_id, settings.round_max_seconds
+            )
         )
 
     audio_url = f"/rooms/{room_key}/rounds/{active.round_id}/audio"
@@ -272,7 +274,9 @@ async def submit_guess(
                 True,
                 points,
             )
-            await _broadcast_player_finished(room_key, active, user_id, "correct", points)
+            await _broadcast_player_finished(
+                room_key, active, user_id, "correct", points
+            )
         else:
             await _persist_guess(
                 round_id, user_id, bracket_index, active.brackets, guess_label, False, 0
@@ -281,7 +285,9 @@ async def submit_guess(
             if new_index >= len(active.brackets):
                 player.outcome = "exhausted"
                 player.points = 0
-                await _broadcast_player_finished(room_key, active, user_id, "exhausted", 0)
+                await _broadcast_player_finished(
+                    room_key, active, user_id, "exhausted", 0
+                )
             else:
                 player.bracket_index = new_index
                 await state.hub.broadcast(
