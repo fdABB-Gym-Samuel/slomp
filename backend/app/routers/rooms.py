@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from .. import auth, db, game, spotify, state
 from ..models import (
     JoinByCodeRequest,
+    MyRoomOut,
     PhaseRequest,
     PublicRoomOut,
     RoomInfoUpdate,
@@ -19,15 +20,37 @@ from ..matching import normalize_title
 from ..rooms_helpers import (
     assert_leader,
     assert_status,
+    broadcast_leave_results,
+    broadcast_public_room_change,
     build_room_out,
+    claim_orphaned_leadership,
+    clear_empty_room_cleanup,
     fetch_room_out,
     generate_room_code,
+    leave_other_rooms,
+    list_public_rooms_payloads,
     load_room_by_code_or_404,
     load_room_or_404,
+    remove_player_from_room,
     room_key,
+    schedule_empty_room_cleanup,
 )
 
 router = APIRouter(prefix="/rooms", tags=["rooms"])
+
+
+def _spectator_on_join(room: asyncpg.Record) -> bool:
+    """Decide whether a fresh joiner should land in spectator mode. True
+    when the room has left the lobby and `lock_after_lobby` is on; the new
+    player is admitted but sits out until the current game ends and the
+    room is back in the lobby."""
+    if room["status"] == "lobby":
+        return False
+    raw = room["settings"]
+    settings = RoomSettings.model_validate(
+        json.loads(raw) if isinstance(raw, str) else (raw or {})
+    )
+    return settings.lock_after_lobby
 
 
 async def _generate_unique_code(conn: asyncpg.Connection) -> str:
@@ -49,6 +72,7 @@ async def _generate_unique_code(conn: asyncpg.Connection) -> str:
 async def create_room(user_id: UUID = Depends(auth.get_current_user_id)) -> RoomOut:
     async with db.pool().acquire() as conn:
         async with conn.transaction():
+            leave_results = await leave_other_rooms(conn, user_id, None)
             code = await _generate_unique_code(conn)
             room_id = await conn.fetchval(
                 "INSERT INTO rooms (code, leader_id) VALUES ($1, $2) RETURNING id",
@@ -61,48 +85,35 @@ async def create_room(user_id: UUID = Depends(auth.get_current_user_id)) -> Room
                 user_id,
             )
             room = await load_room_or_404(conn, room_id)
-            return await build_room_out(conn, room)
+            out = await build_room_out(conn, room)
+    await broadcast_leave_results(user_id, leave_results)
+    return out
+
+
+@router.get("/mine", response_model=list[MyRoomOut])
+async def list_my_rooms(
+    user_id: UUID = Depends(auth.get_current_user_id),
+) -> list[MyRoomOut]:
+    async with db.pool().acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT r.id, r.name, r.status
+            FROM rooms r
+            JOIN room_players rp ON rp.room_id = r.id
+            WHERE rp.user_id = $1
+            ORDER BY rp.joined_at DESC
+            """,
+            user_id,
+        )
+    return [MyRoomOut(id=r["id"], name=r["name"], status=r["status"]) for r in rows]
 
 
 @router.get("/public", response_model=list[PublicRoomOut])
 async def list_public_rooms(
     user_id: UUID = Depends(auth.get_current_user_id),
 ) -> list[PublicRoomOut]:
-    async with db.pool().acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT
-                r.id,
-                r.name,
-                u.username AS leader_username,
-                (
-                    SELECT count(*)::int FROM room_players rp
-                     WHERE rp.room_id = r.id
-                ) AS player_count,
-                r.settings
-            FROM rooms r
-            JOIN users u ON u.id = r.leader_id
-            WHERE r.is_public AND r.status = 'lobby'
-            ORDER BY r.created_at DESC
-            LIMIT 100
-            """
-        )
-    out: list[PublicRoomOut] = []
-    for r in rows:
-        raw = r["settings"]
-        if isinstance(raw, str):
-            raw = json.loads(raw)
-        spp = (raw or {}).get("songs_per_player", 3)
-        out.append(
-            PublicRoomOut(
-                id=r["id"],
-                name=r["name"],
-                leader_username=r["leader_username"],
-                player_count=r["player_count"],
-                songs_per_player=spp,
-            )
-        )
-    return out
+    payloads = await list_public_rooms_payloads()
+    return [PublicRoomOut.model_validate(p) for p in payloads]
 
 
 @router.post("/join-by-code", response_model=RoomOut)
@@ -114,17 +125,37 @@ async def join_by_code(
     async with db.pool().acquire() as conn:
         async with conn.transaction():
             room = await load_room_by_code_or_404(conn, code)
-            # Late joiners are allowed at any phase. They start with score 0,
-            # are excluded from the in-flight round (not in active_round.players),
-            # and join the next round naturally when _start_next_round rebuilds
-            # players from the DB.
-            await conn.execute(
-                "INSERT INTO room_players (room_id, user_id) VALUES ($1, $2) "
-                "ON CONFLICT DO NOTHING",
+            is_member = await conn.fetchval(
+                "SELECT 1 FROM room_players WHERE room_id = $1 AND user_id = $2",
                 room["id"],
                 user_id,
             )
-            return await build_room_out(conn, room)
+            spectating = False if is_member else _spectator_on_join(room)
+            leave_results = await leave_other_rooms(conn, user_id, room["id"])
+            # Late joiners with `lock_after_lobby` off slot into the next
+            # round naturally. With it on, they're flagged `spectating` so
+            # `_start_next_round` skips them until the room returns to the
+            # lobby.
+            await conn.execute(
+                "INSERT INTO room_players (room_id, user_id, spectating) "
+                "VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                room["id"],
+                user_id,
+                spectating,
+            )
+            new_leader = await claim_orphaned_leadership(conn, room, user_id)
+            if new_leader is not None:
+                room = await load_room_or_404(conn, room["id"])
+            out = await build_room_out(conn, room)
+    clear_empty_room_cleanup(room["id"])
+    await broadcast_leave_results(user_id, leave_results)
+    if new_leader is not None:
+        await state.hub.broadcast(
+            room_key(room),
+            {"type": "leader_changed", "payload": {"leader_id": str(new_leader)}},
+        )
+    await broadcast_public_room_change(room["id"])
+    return out
 
 
 @router.get("/{room_id}", response_model=RoomOut)
@@ -186,6 +217,7 @@ async def update_room_info(
             },
         },
     )
+    await broadcast_public_room_change(room["id"])
     return out
 
 
@@ -214,13 +246,28 @@ async def join_room(
                         "message": "this room is private; join with its code",
                     },
                 )
+            spectating = False if is_member else _spectator_on_join(room)
+            leave_results = await leave_other_rooms(conn, user_id, room["id"])
             await conn.execute(
-                "INSERT INTO room_players (room_id, user_id) VALUES ($1, $2) "
-                "ON CONFLICT DO NOTHING",
+                "INSERT INTO room_players (room_id, user_id, spectating) "
+                "VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
                 room["id"],
                 user_id,
+                spectating,
             )
-            return await build_room_out(conn, room)
+            new_leader = await claim_orphaned_leadership(conn, room, user_id)
+            if new_leader is not None:
+                room = await load_room_or_404(conn, room["id"])
+            out = await build_room_out(conn, room)
+    clear_empty_room_cleanup(room["id"])
+    await broadcast_leave_results(user_id, leave_results)
+    if new_leader is not None:
+        await state.hub.broadcast(
+            room_key(room),
+            {"type": "leader_changed", "payload": {"leader_id": str(new_leader)}},
+        )
+    await broadcast_public_room_change(room["id"])
+    return out
 
 
 @router.post("/{room_id}/leave", status_code=204)
@@ -231,35 +278,22 @@ async def leave_room(
     async with db.pool().acquire() as conn:
         async with conn.transaction():
             room = await load_room_or_404(conn, room_id)
-            await conn.execute(
-                "DELETE FROM room_players WHERE room_id = $1 AND user_id = $2",
-                room["id"],
-                user_id,
-            )
-            remaining = await conn.fetchval(
-                "SELECT count(*) FROM room_players WHERE room_id = $1",
-                room["id"],
-            )
-            if remaining == 0:
-                await conn.execute("DELETE FROM rooms WHERE id = $1", room["id"])
-                await state.registry.remove(key)
-            elif room["leader_id"] == user_id:
-                # Leadership passes to the earliest remaining joiner
-                new_leader = await conn.fetchval(
-                    "SELECT user_id FROM room_players WHERE room_id = $1 "
-                    "ORDER BY joined_at ASC LIMIT 1",
-                    room["id"],
-                )
-                await conn.execute(
-                    "UPDATE rooms SET leader_id = $1 WHERE id = $2",
-                    new_leader,
-                    room["id"],
-                )
+            now_empty, new_leader = await remove_player_from_room(conn, room, user_id)
 
+    if now_empty:
+        schedule_empty_room_cleanup(room_id)
+        await broadcast_public_room_change(room_id)
+        return Response(status_code=204)
     await state.hub.broadcast(
         key,
         {"type": "player_left", "payload": {"user_id": str(user_id)}},
     )
+    if new_leader is not None:
+        await state.hub.broadcast(
+            key,
+            {"type": "leader_changed", "payload": {"leader_id": str(new_leader)}},
+        )
+    await broadcast_public_room_change(room_id)
     return Response(status_code=204)
 
 
@@ -307,6 +341,7 @@ async def update_settings(
             "payload": {"settings": new_settings.model_dump()},
         },
     )
+    await broadcast_public_room_change(room["id"])
     return out
 
 
@@ -339,8 +374,41 @@ async def change_phase(
                     },
                 )
 
+            if target == "selecting":
+                # Solo games are degenerate (the picker can't guess their
+                # own songs), so block the transition before everyone wastes
+                # time picking.
+                player_count = await conn.fetchval(
+                    "SELECT count(*) FROM room_players WHERE room_id = $1",
+                    room["id"],
+                )
+                if player_count < 2:
+                    raise HTTPException(
+                        status.HTTP_409_CONFLICT,
+                        detail={
+                            "code": "not_enough_players",
+                            "message": "need at least 2 players to start",
+                        },
+                    )
+
             if target == "playing":
-                # Verify every player has submitted exactly songs_per_player tracks
+                # Verify every active (non-spectator) player has submitted
+                # exactly songs_per_player tracks. Spectators sit out the
+                # current game entirely, so they don't count toward the
+                # shortfall.
+                active_count = await conn.fetchval(
+                    "SELECT count(*) FROM room_players "
+                    "WHERE room_id = $1 AND spectating = FALSE",
+                    room["id"],
+                )
+                if active_count < 2:
+                    raise HTTPException(
+                        status.HTTP_409_CONFLICT,
+                        detail={
+                            "code": "not_enough_players",
+                            "message": "need at least 2 active players to start",
+                        },
+                    )
                 settings = RoomSettings.model_validate(
                     room["settings"]
                     if isinstance(room["settings"], dict)
@@ -353,7 +421,7 @@ async def change_phase(
                     JOIN users u ON u.id = rp.user_id
                     LEFT JOIN room_song_pickers rsp
                            ON rsp.room_id = rp.room_id AND rsp.user_id = rp.user_id
-                    WHERE rp.room_id = $1
+                    WHERE rp.room_id = $1 AND rp.spectating = FALSE
                     GROUP BY rp.user_id, u.username
                     HAVING count(rsp.song_id) <> $2
                     LIMIT 1
@@ -378,6 +446,13 @@ async def change_phase(
                 target,
                 room["id"],
             )
+            if target == "lobby":
+                # Returning to the lobby promotes any waiting spectators
+                # back to full members for the next game.
+                await conn.execute(
+                    "UPDATE room_players SET spectating = FALSE WHERE room_id = $1",
+                    room["id"],
+                )
             room = await load_room_or_404(conn, room_id)
             out = await build_room_out(conn, room)
 
@@ -386,6 +461,7 @@ async def change_phase(
         key,
         {"type": "phase_changed", "payload": {"status": target}},
     )
+    await broadcast_public_room_change(room["id"])
 
     if target == "playing":
         await game.start_game(key)
@@ -437,6 +513,7 @@ async def promote_player(
         room_key(room),
         {"type": "leader_changed", "payload": {"leader_id": str(target_user_id)}},
     )
+    await broadcast_public_room_change(room["id"])
     return out
 
 
@@ -477,6 +554,7 @@ async def kick_player(
         room_key(room),
         {"type": "player_kicked", "payload": {"user_id": str(target_user_id)}},
     )
+    await broadcast_public_room_change(room["id"])
     return Response(status_code=204)
 
 
@@ -497,6 +575,7 @@ async def restart_room(
         key,
         {"type": "phase_changed", "payload": {"status": "lobby"}},
     )
+    await broadcast_public_room_change(room_id)
     return out
 
 
@@ -696,7 +775,7 @@ async def get_results(
             SELECT u.id, u.username, rp.score
             FROM room_players rp
             JOIN users u ON u.id = rp.user_id
-            WHERE rp.room_id = $1
+            WHERE rp.room_id = $1 AND rp.spectating = FALSE
             ORDER BY rp.score DESC, u.username ASC
             """,
             room["id"],

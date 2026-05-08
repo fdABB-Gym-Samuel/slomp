@@ -20,6 +20,21 @@
     onPromote?: (userId: string, username: string) => void;
     onKick?: (userId: string, username: string) => void;
   } = $props();
+
+  // Tick once a second so the displayed countdown stays current. Only runs
+  // while a deadline exists, to avoid invalidating the component every
+  // second when nobody is disconnected.
+  let now = $state(Date.now() / 1000);
+  $effect(() => {
+    const needsTicker = players.some((p) => p.auto_leave_at != null);
+    if (!needsTicker) return;
+    const id = setInterval(() => (now = Date.now() / 1000), 500);
+    return () => clearInterval(id);
+  });
+
+  function secondsUntil(deadline: number): number {
+    return Math.max(0, Math.ceil(deadline - now));
+  }
 </script>
 
 <ul class="divide-y divide-border">
@@ -38,6 +53,22 @@
         </span>
         {#if p.user.id === leaderId}
           <span class="badge bg-accent/20 text-accent">leader</span>
+        {/if}
+        {#if p.spectating}
+          <span
+            class="badge bg-text-muted/20 text-text-secondary"
+            title="joined mid-game; sits out until the next game"
+          >
+            spectator
+          </span>
+        {/if}
+        {#if !p.connected && p.auto_leave_at}
+          <span
+            class="text-xs text-danger"
+            title="auto-leaves the room when this hits 0"
+          >
+            kick in {secondsUntil(p.auto_leave_at)}s
+          </span>
         {/if}
       </div>
       <div class="flex items-center gap-3 text-sm text-text-secondary">

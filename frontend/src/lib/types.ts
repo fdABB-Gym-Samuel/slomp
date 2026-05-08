@@ -18,6 +18,7 @@ export interface RoomSettings {
   round_intermission_seconds: number;
   round_max_seconds: number;
   post_game_delay_seconds: number;
+  lock_after_lobby: boolean;
 }
 
 export interface RoomPlayer {
@@ -25,6 +26,8 @@ export interface RoomPlayer {
   score: number;
   connected: boolean;
   songs_submitted: number;
+  spectating: boolean;
+  auto_leave_at: number | null;
 }
 
 export interface Room {
@@ -45,6 +48,15 @@ export interface PublicRoom {
   leader_username: string;
   player_count: number;
   songs_per_player: number;
+  cleanup_at: number | null;
+  status: RoomStatus;
+  joins_as_spectator: boolean;
+}
+
+export interface MyRoom {
+  id: string;
+  name: string | null;
+  status: RoomStatus;
 }
 
 export interface SongCandidate {

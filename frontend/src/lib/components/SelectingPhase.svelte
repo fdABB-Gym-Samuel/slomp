@@ -16,8 +16,14 @@
 
   const isLeader = $derived(auth.user?.id === roomData.leader_id);
   const quota = $derived(roomData.settings.songs_per_player);
+  const isSpectator = $derived(
+    roomData.players.find((p) => p.user.id === auth.user?.id)?.spectating ?? false
+  );
   const allReady = $derived(
-    roomData.players.every((p) => p.songs_submitted >= quota)
+    roomData.players.every((p) => p.spectating || p.songs_submitted >= quota)
+  );
+  const enoughActive = $derived(
+    roomData.players.filter((p) => !p.spectating).length >= 2
   );
 
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -53,7 +59,7 @@
   }
 
   $effect(() => {
-    loadMine();
+    if (!isSpectator) loadMine();
   });
 
   async function submit(track: SongCandidate) {
@@ -93,6 +99,15 @@
 
 <div class="grid gap-6 md:grid-cols-[2fr_1fr]">
   <div class="space-y-4">
+    {#if isSpectator}
+      <div class="card text-center">
+        <h2 class="text-lg font-semibold">You joined mid-game</h2>
+        <p class="mt-2 text-sm text-text-secondary">
+          The current game is in song selection. You'll join in for the next
+          game once this one wraps up.
+        </p>
+      </div>
+    {:else}
     <div class="card">
       <h2 class="mb-3 text-lg font-semibold">
         Find songs ({mySongs.length} / {quota})
@@ -172,6 +187,7 @@
         </ul>
       {/if}
     </div>
+    {/if}
   </div>
 
   <div class="space-y-4">
@@ -189,11 +205,21 @@
     {#if isLeader}
       <button
         class="btn-primary w-full"
-        disabled={starting || !allReady}
+        disabled={starting || !allReady || !enoughActive}
         onclick={startGame}
-        title={allReady ? '' : 'waiting for everyone to finish picking'}
+        title={!enoughActive
+          ? 'need at least 2 active players (spectators don\'t count)'
+          : !allReady
+            ? 'waiting for everyone to finish picking'
+            : ''}
       >
-        {starting ? 'Starting…' : allReady ? 'Start the game' : 'Waiting for picks'}
+        {starting
+          ? 'Starting…'
+          : !enoughActive
+            ? 'Need at least 2 players'
+            : !allReady
+              ? 'Waiting for picks'
+              : 'Start the game'}
       </button>
     {/if}
   </div>

@@ -1,6 +1,7 @@
 import type {
   ArtistSummary,
   GuessResult,
+  MyRoom,
   PublicRoom,
   Room,
   RoomSettings,
@@ -101,6 +102,7 @@ export const api = {
       body: JSON.stringify(info),
     }),
   listPublicRooms: () => request<PublicRoom[]>("/rooms/public"),
+  listMyRooms: () => request<MyRoom[]>("/rooms/mine"),
   changePhase: (id: string, target: RoomStatus) =>
     request<Room>(`/rooms/${id}/phase`, {
       method: "POST",

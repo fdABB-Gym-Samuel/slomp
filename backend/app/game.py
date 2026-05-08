@@ -6,6 +6,12 @@ import random
 from collections import defaultdict
 from uuid import UUID
 
+# When everybody who could play this song is also a picker (everyone picked
+# the same track, or a tiny game with one non-picker who got assigned), the
+# round has nobody to guess. Hold the round_started UI for a beat so it
+# doesn't feel like the song was skipped, then advance to intermission.
+NO_GUESSERS_DURATION = 1.0
+
 from fastapi import HTTPException, status
 
 from . import db, matching, spotify, state
@@ -117,7 +123,8 @@ async def _start_next_round(room_key: str) -> None:
             next_song_id,
         )
         player_rows = await conn.fetch(
-            "SELECT user_id FROM room_players WHERE room_id = $1",
+            "SELECT user_id FROM room_players "
+            "WHERE room_id = $1 AND spectating = FALSE",
             room_id,
         )
 
@@ -146,14 +153,13 @@ async def _start_next_round(room_key: str) -> None:
         hint_field=settings.hint_field,
     )
 
+    duration = NO_GUESSERS_DURATION if not players else settings.round_max_seconds
     async with game.lock:
         game.active_round = active
         if game.timeout_task is not None:
             game.timeout_task.cancel()
         game.timeout_task = asyncio.create_task(
-            _round_timeout_watcher(
-                room_key, active.round_id, settings.round_max_seconds
-            )
+            _round_timeout_watcher(room_key, active.round_id, duration)
         )
 
     audio_url = f"/rooms/{room_key}/rounds/{active.round_id}/audio"
@@ -170,7 +176,7 @@ async def _start_next_round(room_key: str) -> None:
                 if settings.album_art_enabled
                 else None,
                 "guess_brackets_seconds": brackets,
-                "round_max_seconds": settings.round_max_seconds,
+                "round_max_seconds": duration,
             },
         },
     )
@@ -558,7 +564,7 @@ async def _end_round(room_key: str) -> None:
             SELECT u.id, u.username, rp.score
             FROM room_players rp
             JOIN users u ON u.id = rp.user_id
-            WHERE rp.room_id = $1
+            WHERE rp.room_id = $1 AND rp.spectating = FALSE
             ORDER BY rp.score DESC, u.username ASC
             """,
             UUID(room_key),
@@ -628,7 +634,7 @@ async def _end_game(room_key: str) -> None:
             SELECT u.id, u.username, rp.score
             FROM room_players rp
             JOIN users u ON u.id = rp.user_id
-            WHERE rp.room_id = $1
+            WHERE rp.room_id = $1 AND rp.spectating = FALSE
             ORDER BY rp.score DESC, u.username ASC
             """,
             UUID(room_key),
@@ -666,7 +672,9 @@ async def restart_game(room_key: str) -> None:
             await conn.execute("DELETE FROM rounds WHERE room_id = $1", room["id"])
             await conn.execute("DELETE FROM room_songs WHERE room_id = $1", room["id"])
             await conn.execute(
-                "UPDATE room_players SET score = 0 WHERE room_id = $1", room["id"]
+                "UPDATE room_players SET score = 0, spectating = FALSE "
+                "WHERE room_id = $1",
+                room["id"],
             )
             await conn.execute(
                 "UPDATE rooms SET status = 'lobby', started_at = NULL, ended_at = NULL "

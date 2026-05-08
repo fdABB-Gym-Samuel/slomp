@@ -309,10 +309,17 @@
         {/if}
         <button
           class="btn-primary w-full"
-          disabled={starting || roomData.players.length === 0}
+          disabled={starting || roomData.players.length < 2}
           onclick={startSelecting}
+          title={roomData.players.length < 2
+            ? 'need at least 2 players — solo games have no one to guess'
+            : ''}
         >
-          {starting ? 'Starting…' : 'Start song selection'}
+          {starting
+            ? 'Starting…'
+            : roomData.players.length < 2
+              ? 'Need at least 2 players'
+              : 'Start song selection'}
         </button>
       {:else}
         <p class="text-sm text-text-secondary">

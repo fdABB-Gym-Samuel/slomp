@@ -1,7 +1,10 @@
 """Shared helpers for the rooms router and the game module."""
 
+import asyncio
 import json
+import logging
 import secrets
+import time
 from uuid import UUID
 
 import asyncpg
@@ -9,6 +12,13 @@ from fastapi import HTTPException, status
 
 from . import db, state
 from .models import RoomOut, RoomPlayerOut, RoomSettings, UserOut, serialize_settings
+
+logger = logging.getLogger("slomp.rooms")
+
+# When the last member leaves, hold the room for this long before deleting.
+# Gives drop-and-rejoin (e.g., URL bar fumbles) a window to re-populate the
+# room before it's torn down for real.
+EMPTY_ROOM_DELETE_DELAY_SECONDS = 60.0
 
 CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no O/0/I/1/L
 
@@ -82,6 +92,251 @@ def room_key(room: asyncpg.Record | UUID) -> str:
     return str(room["id"])
 
 
+async def remove_player_from_room(
+    conn: asyncpg.Connection, room: asyncpg.Record, user_id: UUID
+) -> tuple[bool, UUID | None]:
+    """Delete the user's row from room_players and hand off leadership if
+    needed. Must be called inside a transaction. Returns
+    (room_now_empty, new_leader_id). The caller is responsible for kicking
+    off `schedule_empty_room_cleanup` when room_now_empty is True — the
+    actual room delete is deferred so a player who immediately rejoins
+    (or someone who joins via code/link) can save it."""
+    await conn.execute(
+        "DELETE FROM room_players WHERE room_id = $1 AND user_id = $2",
+        room["id"],
+        user_id,
+    )
+    remaining = await conn.fetchval(
+        "SELECT count(*) FROM room_players WHERE room_id = $1",
+        room["id"],
+    )
+    if remaining == 0:
+        return True, None
+    if room["leader_id"] == user_id:
+        new_leader = await conn.fetchval(
+            "SELECT user_id FROM room_players WHERE room_id = $1 "
+            "ORDER BY joined_at ASC LIMIT 1",
+            room["id"],
+        )
+        await conn.execute(
+            "UPDATE rooms SET leader_id = $1 WHERE id = $2",
+            new_leader,
+            room["id"],
+        )
+        return False, new_leader
+    return False, None
+
+
+async def _cleanup_empty_room(room_id: UUID) -> None:
+    """Reap an empty room. Lobby-phase rooms get the 60s grace window so a
+    URL-bar fumble or quick refresh can recover them. Once the game has
+    been started (any non-lobby phase), the room is dead — there's no game
+    state worth saving and a late-joiner couldn't sensibly resume — so we
+    delete immediately."""
+    key = room_key(room_id)
+    async with db.pool().acquire() as conn:
+        status = await conn.fetchval("SELECT status FROM rooms WHERE id = $1", room_id)
+    if status is None:
+        return  # already gone
+
+    if status == "lobby":
+        state.empty_room_deadlines[key] = time.time() + EMPTY_ROOM_DELETE_DELAY_SECONDS
+        try:
+            await asyncio.sleep(EMPTY_ROOM_DELETE_DELAY_SECONDS)
+        except asyncio.CancelledError:
+            state.empty_room_deadlines.pop(key, None)
+            return
+
+    deleted = False
+    try:
+        async with db.pool().acquire() as conn:
+            async with conn.transaction():
+                still_empty = not await conn.fetchval(
+                    "SELECT 1 FROM room_players WHERE room_id = $1",
+                    room_id,
+                )
+                if not still_empty:
+                    return
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM rooms WHERE id = $1", room_id
+                )
+                if not exists:
+                    return
+                await conn.execute("DELETE FROM rooms WHERE id = $1", room_id)
+                deleted = True
+        await state.registry.remove(key)
+    except Exception:
+        logger.exception("empty-room cleanup failed for room=%s", room_id)
+    finally:
+        state.empty_room_deadlines.pop(key, None)
+        if deleted:
+            await broadcast_public_room_change(room_id)
+
+
+def schedule_empty_room_cleanup(room_id: UUID) -> None:
+    """Reap an empty room. Lobby phase gets a grace window so transient
+    drops can recover; later phases get immediate cleanup."""
+    asyncio.create_task(_cleanup_empty_room(room_id))
+
+
+def clear_empty_room_cleanup(room_id: UUID) -> None:
+    """Cancel any pending empty-room cleanup deadline. Use when a join
+    repopulates a room — the deferred delete task self-checks and no-ops,
+    but the deadline shouldn't keep advertising itself to clients."""
+    state.empty_room_deadlines.pop(room_key(room_id), None)
+
+
+async def claim_orphaned_leadership(
+    conn: asyncpg.Connection, room: asyncpg.Record, user_id: UUID
+) -> UUID | None:
+    """If `room`'s recorded leader is no longer a member (e.g., they left
+    during the empty-room cleanup window and someone else just joined),
+    promote `user_id` to leader. Must be called inside a transaction
+    *after* `user_id` has been inserted into room_players. Returns the
+    new leader id when a transfer happened, else None."""
+    leader_present = await conn.fetchval(
+        "SELECT 1 FROM room_players WHERE room_id = $1 AND user_id = $2",
+        room["id"],
+        room["leader_id"],
+    )
+    if leader_present:
+        return None
+    await conn.execute(
+        "UPDATE rooms SET leader_id = $1 WHERE id = $2",
+        user_id,
+        room["id"],
+    )
+    return user_id
+
+
+_PUBLIC_ROOM_QUERY = """
+    SELECT r.id, r.name, r.is_public, r.status, r.settings,
+           u.username AS leader_username,
+           (SELECT count(*)::int FROM room_players rp WHERE rp.room_id = r.id)
+               AS player_count
+    FROM rooms r
+    JOIN users u ON u.id = r.leader_id
+    WHERE r.id = $1
+"""
+
+
+def _public_room_payload(row: asyncpg.Record) -> dict:
+    raw = row["settings"]
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    settings = raw or {}
+    spp = settings.get("songs_per_player", 3)
+    locked = bool(settings.get("lock_after_lobby", False))
+    # When `lock_after_lobby` is on and the game has left the lobby, joining
+    # is still allowed but the new player sits out until the current game
+    # finishes. The browser surfaces this so the user knows what they're
+    # signing up for before clicking Join.
+    joins_as_spectator = locked and row["status"] != "lobby"
+    return {
+        "id": str(row["id"]),
+        "name": row["name"],
+        "leader_username": row["leader_username"],
+        "player_count": row["player_count"],
+        "songs_per_player": spp,
+        "cleanup_at": state.empty_room_deadlines.get(str(row["id"])),
+        "status": row["status"],
+        "joins_as_spectator": joins_as_spectator,
+    }
+
+
+async def broadcast_public_room_change(room_id: UUID) -> None:
+    """Refetch the room and broadcast the right upsert/remove event to the
+    home-page lobby. If the room is missing or no longer public, fire a
+    `public_room_removed`; clients that don't have it stored simply ignore
+    the event."""
+    async with db.pool().acquire() as conn:
+        row = await conn.fetchrow(_PUBLIC_ROOM_QUERY, room_id)
+    if row is None or not row["is_public"]:
+        await state.lobby_hub.broadcast(
+            {
+                "type": "public_room_removed",
+                "payload": {"id": str(room_id)},
+            }
+        )
+        return
+    await state.lobby_hub.broadcast(
+        {
+            "type": "public_room_upsert",
+            "payload": _public_room_payload(row),
+        }
+    )
+
+
+async def list_public_rooms_payloads() -> list[dict]:
+    async with db.pool().acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT r.id, r.name, r.is_public, r.status, r.settings,
+                   u.username AS leader_username,
+                   (SELECT count(*)::int FROM room_players rp
+                     WHERE rp.room_id = r.id) AS player_count
+            FROM rooms r
+            JOIN users u ON u.id = r.leader_id
+            WHERE r.is_public
+            ORDER BY r.created_at DESC
+            LIMIT 100
+            """
+        )
+    return [_public_room_payload(r) for r in rows]
+
+
+async def leave_other_rooms(
+    conn: asyncpg.Connection, user_id: UUID, except_room_id: UUID | None
+) -> list[tuple[str, bool, UUID | None, UUID]]:
+    """Remove the user from every room they're in except `except_room_id`.
+    Must be called inside a transaction. Returns a list of
+    (room_key, room_now_empty, new_leader_id, room_id) the caller should
+    broadcast and act on after the transaction commits."""
+    if except_room_id is None:
+        rows = await conn.fetch(
+            "SELECT room_id FROM room_players WHERE user_id = $1",
+            user_id,
+        )
+    else:
+        rows = await conn.fetch(
+            "SELECT room_id FROM room_players WHERE user_id = $1 AND room_id <> $2",
+            user_id,
+            except_room_id,
+        )
+    results: list[tuple[str, bool, UUID | None, UUID]] = []
+    for r in rows:
+        room = await conn.fetchrow(
+            f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE id = $1",
+            r["room_id"],
+        )
+        if room is None:
+            continue
+        now_empty, new_leader = await remove_player_from_room(conn, room, user_id)
+        results.append((room_key(room), now_empty, new_leader, room["id"]))
+    return results
+
+
+async def broadcast_leave_results(
+    user_id: UUID, results: list[tuple[str, bool, UUID | None, UUID]]
+) -> None:
+    """Run the post-commit broadcasts for `leave_other_rooms` results."""
+    for key, now_empty, new_leader, room_id in results:
+        if now_empty:
+            schedule_empty_room_cleanup(room_id)
+            await broadcast_public_room_change(room_id)
+            continue
+        await state.hub.broadcast(
+            key,
+            {"type": "player_left", "payload": {"user_id": str(user_id)}},
+        )
+        if new_leader is not None:
+            await state.hub.broadcast(
+                key,
+                {"type": "leader_changed", "payload": {"leader_id": str(new_leader)}},
+            )
+        await broadcast_public_room_change(room_id)
+
+
 async def build_room_out(conn: asyncpg.Connection, room: asyncpg.Record) -> RoomOut:
     rows = await conn.fetch(
         """
@@ -89,6 +344,7 @@ async def build_room_out(conn: asyncpg.Connection, room: asyncpg.Record) -> Room
             rp.user_id,
             u.username,
             rp.score,
+            rp.spectating,
             (
                 SELECT count(*)::int FROM room_song_pickers rsp
                  WHERE rsp.room_id = rp.room_id AND rsp.user_id = rp.user_id
@@ -109,6 +365,8 @@ async def build_room_out(conn: asyncpg.Connection, room: asyncpg.Record) -> Room
             score=r["score"],
             connected=r["user_id"] in connected,
             songs_submitted=r["submitted"],
+            spectating=r["spectating"],
+            auto_leave_at=state.disconnect_deadlines.get((key, r["user_id"])),
         )
         for r in rows
     ]

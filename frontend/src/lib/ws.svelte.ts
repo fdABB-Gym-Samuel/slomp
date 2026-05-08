@@ -127,8 +127,31 @@ class RoomConnection {
         break;
 
       case "player_joined":
-      case "player_left":
+        if (this.room) {
+          const p = this.room.players.find(
+            (x) => x.user.id === ev.payload.user_id,
+          );
+          if (p) {
+            p.connected = true;
+            p.auto_leave_at = null;
+          }
+        }
+        this._refetchRoom();
+        break;
+
       case "player_disconnected":
+        if (this.room) {
+          const p = this.room.players.find(
+            (x) => x.user.id === ev.payload.user_id,
+          );
+          if (p) {
+            p.connected = false;
+            p.auto_leave_at = ev.payload.auto_leave_at ?? null;
+          }
+        }
+        break;
+
+      case "player_left":
         this._refetchRoom();
         break;
 
@@ -161,9 +184,12 @@ class RoomConnection {
         if (this.room) {
           this.room.status = ev.payload.status;
           if (ev.payload.status === "lobby") {
+            // Server promotes spectators to full members on the way back
+            // to the lobby; mirror that locally so the badges drop.
             for (const p of this.room.players) {
               p.songs_submitted = 0;
               p.score = 0;
+              p.spectating = false;
             }
           }
         }

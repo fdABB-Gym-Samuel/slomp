@@ -36,6 +36,9 @@
   const meId = $derived(auth.user?.id ?? '');
   const active = $derived(room.activeRound);
   const isPicker = $derived(!!active && active.picker_ids.includes(meId));
+  const isSpectator = $derived(
+    roomData.players.find((p) => p.user.id === meId)?.spectating ?? false
+  );
   const myBracket = $derived(room.bracketIndices[meId] ?? 0);
   const myFinished = $derived(room.finishedPlayers[meId] ?? null);
   const brackets = $derived(active?.guess_brackets_seconds ?? []);
@@ -277,7 +280,20 @@
 {:else if active}
   <div class="mx-auto max-w-2xl">
     <div class="space-y-4">
-      {#if isPicker}
+      {#if isSpectator}
+        <div class="card text-center">
+          <p class="text-sm text-text-muted">Spectating</p>
+          <h2 class="mt-2 text-xl font-semibold">Game in progress</h2>
+          <p class="mt-2 text-sm text-text-secondary">
+            You'll join in for the next game once this one wraps up.
+          </p>
+          {#if secondsLeft !== null}
+            <p class="mt-2 font-mono text-xs text-text-muted">
+              round ends in {secondsLeft}s
+            </p>
+          {/if}
+        </div>
+      {:else if isPicker}
         <div class="card text-center">
           <p class="text-sm text-text-muted">Your song is up</p>
           <h2 class="mt-2 text-xl font-semibold">Watching the others guess</h2>

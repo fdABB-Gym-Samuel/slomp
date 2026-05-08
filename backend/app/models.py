@@ -43,6 +43,7 @@ class RoomSettings(BaseModel):
     round_intermission_seconds: int = Field(default=6, ge=0, le=30)
     round_max_seconds: int = Field(default=60, ge=10, le=600)
     post_game_delay_seconds: int = Field(default=15, ge=0)
+    lock_after_lobby: bool = False
 
 
 class RoomPlayerOut(BaseModel):
@@ -50,6 +51,8 @@ class RoomPlayerOut(BaseModel):
     score: int
     connected: bool
     songs_submitted: int
+    spectating: bool = False
+    auto_leave_at: float | None = None
 
 
 class RoomOut(BaseModel):
@@ -83,6 +86,15 @@ class PublicRoomOut(BaseModel):
     leader_username: str
     player_count: int
     songs_per_player: int
+    cleanup_at: float | None = None
+    status: RoomStatus = "lobby"
+    joins_as_spectator: bool = False
+
+
+class MyRoomOut(BaseModel):
+    id: UUID
+    name: str | None
+    status: RoomStatus
 
 
 # ---------- songs ---------------------------------------------------------

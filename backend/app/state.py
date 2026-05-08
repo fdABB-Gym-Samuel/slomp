@@ -148,3 +148,42 @@ class WebSocketHub:
 
 
 hub = WebSocketHub()
+
+
+# Live deadlines for the two grace-period mechanisms so we can surface
+# countdowns to clients. Single-threaded asyncio access — no lock needed.
+# `disconnect_deadlines` keys on (room_key, user_id) → unix seconds at which
+# the player will be auto-leaved from the room. `empty_room_deadlines` keys
+# on room_key → unix seconds at which an empty room will be deleted.
+disconnect_deadlines: dict[tuple[str, UUID], float] = {}
+empty_room_deadlines: dict[str, float] = {}
+
+
+class LobbyHub:
+    """Connections from clients viewing the home-page public-rooms browser.
+    Unlike `WebSocketHub`, there's no per-room or per-user keying — every
+    connected client gets every public-room update."""
+
+    def __init__(self) -> None:
+        self._conns: set[Any] = set()
+        self._lock = asyncio.Lock()
+
+    async def add(self, ws: Any) -> None:
+        async with self._lock:
+            self._conns.add(ws)
+
+    async def remove(self, ws: Any) -> None:
+        async with self._lock:
+            self._conns.discard(ws)
+
+    async def broadcast(self, message: dict) -> None:
+        async with self._lock:
+            targets = list(self._conns)
+        for ws in targets:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                pass
+
+
+lobby_hub = LobbyHub()

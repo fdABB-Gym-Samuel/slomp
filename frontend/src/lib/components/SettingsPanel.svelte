@@ -33,7 +33,8 @@
       local.album_art_unblur !== s.album_art_unblur ||
       local.hint_field !== s.hint_field ||
       local.round_intermission_seconds !== s.round_intermission_seconds ||
-      local.round_max_seconds !== s.round_max_seconds
+      local.round_max_seconds !== s.round_max_seconds ||
+      local.lock_after_lobby !== s.lock_after_lobby
     ) {
       return true;
     }
@@ -234,6 +235,34 @@
         </p>
       </div>
     </div>
+  </section>
+
+  <hr class="border-border" />
+
+  <section class="space-y-4">
+    <h3 class="text-base font-semibold text-text-primary">Access</h3>
+    <p class="text-xs text-text-muted">
+      What happens to people who try to join once the game has started.
+    </p>
+
+    <label class="flex items-start gap-2 text-sm">
+      <input
+        type="checkbox"
+        class="mt-1"
+        bind:checked={local.lock_after_lobby}
+        disabled={readonly}
+      />
+      <span>
+        Late joiners spectate
+        <span class="block text-xs text-text-muted">
+          Once the game leaves the lobby, anyone joining is added as a
+          spectator — they can watch but won't pick songs, guess, or score
+          until the current game finishes and the room returns to the lobby.
+          Without this, late joiners slot into the next round of the current
+          game.
+        </span>
+      </span>
+    </label>
   </section>
 
   {#if !readonly}
