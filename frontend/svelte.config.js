@@ -12,5 +12,11 @@ export default {
       precompress: false,
       strict: false,
     }),
+    csp: {
+      mode: "hash",
+      directives: {
+        "script-src": ["self"],
+      },
+    },
   },
 };
