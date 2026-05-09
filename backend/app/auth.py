@@ -27,11 +27,6 @@ async def create_session_in_conn(
     return token, expires_at
 
 
-async def delete_session(token: str) -> None:
-    async with db.pool().acquire() as conn:
-        await conn.execute("DELETE FROM sessions WHERE token = $1", token)
-
-
 async def lookup_user_id(token: str) -> UUID | None:
     async with db.pool().acquire() as conn:
         row = await conn.fetchrow(

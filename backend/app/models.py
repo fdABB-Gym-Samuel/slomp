@@ -166,19 +166,6 @@ class SkipResultOut(BaseModel):
     finished: bool
 
 
-class ScoreboardEntry(BaseModel):
-    user: UserOut
-    score: int
-
-
-# ---------- WS event payloads (for typing) ------------------------------
-
-
-class WSEvent(BaseModel):
-    type: str
-    payload: dict
-
-
 # ---------- DB row helpers ---------------------------------------------
 
 

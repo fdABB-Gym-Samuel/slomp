@@ -54,9 +54,9 @@ class RoomConnection {
     // In dev (vite on :5173), bypass vite's WS proxy and hit the backend
     // directly on :8000. Vite's WS proxy is unreliable when combined with
     // HMR + overlapping HTTP/WS prefixes. Cookies on localhost are not
-    // port-scoped, so the session cookie set via vite-proxied /auth/login
-    // is also sent on the direct backend connection. In prod, frontend and
-    // backend share an origin via a real reverse proxy.
+    // port-scoped, so the session cookie set via the vite-proxied join/
+    // create-room calls is also sent on the direct backend connection. In
+    // prod, frontend and backend share an origin via a real reverse proxy.
     const wsHost =
       location.port === "5173" ? `${location.hostname}:8000` : location.host;
     const url = `${proto}//${wsHost}/rooms/${this.roomId}/ws`;
