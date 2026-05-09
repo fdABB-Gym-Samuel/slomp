@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
 from .. import auth, db, state
+from ..config import settings
 from ..rooms_helpers import (
     broadcast_public_room_change,
     build_room_out,
@@ -14,6 +15,19 @@ from ..rooms_helpers import (
     room_key,
     schedule_empty_room_cleanup,
 )
+
+
+def _origin_allowed(websocket: WebSocket) -> bool:
+    """SameSite=Lax cookies already block cross-origin WS auth, but a
+    belt-and-suspenders Origin check makes the policy explicit and
+    survives any future loosening of the cookie scope. A missing Origin
+    header (e.g. a non-browser client) is rejected — browsers always send
+    it on WS handshakes."""
+    origin = websocket.headers.get("origin")
+    if origin is None:
+        return False
+    return origin in settings.cors_origins
+
 
 logger = logging.getLogger("slomp.ws")
 router = APIRouter()
@@ -116,23 +130,17 @@ async def _replay_active_round(
         await websocket.send_json({"type": "round_ended", "payload": payload})
         return
 
-    # A non-spectator who joined after the round started is missing from
-    # active.players (which was built from room_players at round-start). Slot
-    # them in at bracket 0 so they can guess this round, see the obscured
-    # cover, and fetch sliced audio — instead of being treated as "finished".
-    async with game.lock:
-        active = game.active_round
-        if (
-            active is not None
-            and not spectating
-            and user_id not in active.picker_ids
-            and user_id not in active.players
-        ):
-            active.players[user_id] = state.PlayerRoundState(user_id=user_id)
-
-    if game.active_round is None:
-        return
+    # A non-spectator who joined the room AFTER the current round started
+    # isn't in `active.players` (which was snapshotted from room_players at
+    # round-start) and they have no scheduled timeout. Don't slot them in
+    # mid-round: the existing `_round_timeout_watcher` was scheduled with
+    # the original duration (or the 1s "no guessers" duration), so a late
+    # joiner could be auto-exhausted before they finish loading. They sit
+    # this round out and naturally pick up the next `round_started`.
     active = game.active_round
+    if active is None:
+        return
+    is_round_participant = user_id in active.picker_ids or user_id in active.players
 
     audio_url = f"/rooms/{key}/rounds/{active.round_id}/audio"
     cover_url = f"/rooms/{key}/rounds/{active.round_id}/cover"
@@ -152,6 +160,19 @@ async def _replay_active_round(
             },
         }
     )
+    if not is_round_participant and not spectating:
+        # Late joiner — let the client know they sit out until the next round.
+        await websocket.send_json(
+            {
+                "type": "player_finished",
+                "payload": {
+                    "round_id": str(active.round_id),
+                    "user_id": str(user_id),
+                    "outcome": "exhausted",
+                    "points": 0,
+                },
+            }
+        )
 
     for uid, pstate in active.players.items():
         if pstate.bracket_index > 0 and not pstate.finished:
@@ -209,6 +230,9 @@ async def _replay_active_round(
 
 @router.websocket("/rooms/{room_id}/ws")
 async def room_ws(websocket: WebSocket, room_id: UUID) -> None:
+    if not _origin_allowed(websocket):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
     token = websocket.cookies.get("session")
     user_id = await auth.lookup_user_id_for_ws(token)
     if user_id is None:
@@ -271,11 +295,24 @@ async def room_ws(websocket: WebSocket, room_id: UUID) -> None:
         # data; without this replay the client sits on the "Setting up the
         # next round…" placeholder until the round naturally ends.
         await _replay_active_round(websocket, key, user_id, spectating)
-        await state.hub.broadcast(
-            key,
-            {"type": "player_joined", "payload": {"user_id": str(user_id)}},
-            except_user=user_id,
+        # Carry the full player record on player_joined so other clients
+        # can upsert the roster without a follow-up GET — that GET could
+        # race subsequent WS events and clobber state mid-update.
+        joining_player = next(
+            (p for p in snapshot.players if p.user.id == user_id), None
         )
+        if joining_player is not None:
+            await state.hub.broadcast(
+                key,
+                {
+                    "type": "player_joined",
+                    "payload": {
+                        "user_id": str(user_id),
+                        "player": joining_player.model_dump(mode="json"),
+                    },
+                },
+                except_user=user_id,
+            )
 
         while True:
             msg = await websocket.receive_json()
@@ -321,6 +358,9 @@ async def room_ws(websocket: WebSocket, room_id: UUID) -> None:
 async def lobby_ws(websocket: WebSocket) -> None:
     """Live feed of public-room changes for clients on the home page.
     Open to anonymous visitors — the home page is public."""
+    if not _origin_allowed(websocket):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
     await websocket.accept()
     await state.lobby_hub.add(websocket)
     try:

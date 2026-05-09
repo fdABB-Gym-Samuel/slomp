@@ -18,6 +18,7 @@ from ..models import (
     SubmitSongRequest,
     SubmittedSongOut,
     UserOut,
+    decode_settings,
 )
 from ..matching import normalize_title
 from ..rooms_helpers import (
@@ -49,11 +50,7 @@ def _spectator_on_join(room: asyncpg.Record) -> bool:
     room is back in the lobby."""
     if room["status"] == "lobby":
         return False
-    raw = room["settings"]
-    settings = RoomSettings.model_validate(
-        json.loads(raw) if isinstance(raw, str) else (raw or {})
-    )
-    return settings.lock_after_lobby
+    return decode_settings(room["settings"]).lock_after_lobby
 
 
 async def _generate_unique_code(conn: asyncpg.Connection) -> str:
@@ -77,10 +74,15 @@ async def _wipe_existing_identity(
     """If the request carries a session cookie pointing to a live user,
     drop them from any room they're in (which also reaps the user row via
     `remove_player_from_room`). Returns the leave_results to broadcast
-    post-commit. A no-op for fresh visitors and dead-cookie cases."""
+    post-commit. A no-op for fresh visitors and dead-cookie cases.
+
+    `sessions.user_id` cascades on the user delete, but we also drop the
+    incoming token explicitly so a session row can't outlive a user even
+    if a future migration weakens the FK."""
     if not incoming_session:
         return []
     old_user_id = await auth.lookup_user_id(incoming_session)
+    await conn.execute("DELETE FROM sessions WHERE token = $1", incoming_session)
     if old_user_id is None:
         return []
     return await leave_other_rooms(conn, old_user_id, None)
@@ -101,6 +103,30 @@ async def _establish_identity(
     token, expires_at = await auth.create_session_in_conn(conn, user_id)
     auth.set_session_cookie(response, token, expires_at)
     return user_id
+
+
+async def _maybe_fallback_to_lobby(conn: asyncpg.Connection, room_id: UUID) -> bool:
+    """If a `selecting` room has fewer than 2 active (non-spectating) players,
+    drop it back to lobby and reset the picks queue so the next round starts
+    clean. Returns True if the fallback fired. Must run inside a transaction.
+    Caller is responsible for broadcasting `phase_changed` post-commit."""
+    row = await conn.fetchrow(
+        "SELECT status FROM rooms WHERE id = $1 FOR UPDATE", room_id
+    )
+    if row is None or row["status"] != "selecting":
+        return False
+    active = await conn.fetchval(
+        "SELECT count(*) FROM room_players WHERE room_id = $1 AND spectating = FALSE",
+        room_id,
+    )
+    if active >= 2:
+        return False
+    await conn.execute("DELETE FROM room_songs WHERE room_id = $1", room_id)
+    await conn.execute(
+        "UPDATE room_players SET spectating = FALSE WHERE room_id = $1", room_id
+    )
+    await conn.execute("UPDATE rooms SET status = 'lobby' WHERE id = $1", room_id)
+    return True
 
 
 async def _assert_name_free_in_room(
@@ -324,10 +350,13 @@ async def leave_room(
     user_id: UUID = Depends(auth.get_current_user_id),
 ) -> Response:
     key = room_key(room_id)
+    fell_back_to_lobby = False
     async with db.pool().acquire() as conn:
         async with conn.transaction():
             room = await load_room_or_404(conn, room_id)
             now_empty, new_leader = await remove_player_from_room(conn, room, user_id)
+            if not now_empty:
+                fell_back_to_lobby = await _maybe_fallback_to_lobby(conn, room["id"])
 
     # The user row was cascade-deleted inside remove_player_from_room, so
     # the session is gone too. Clear the cookie so the browser stops
@@ -347,6 +376,11 @@ async def leave_room(
         await state.hub.broadcast(
             key,
             {"type": "leader_changed", "payload": {"leader_id": str(new_leader)}},
+        )
+    if fell_back_to_lobby:
+        await state.hub.broadcast(
+            key,
+            {"type": "phase_changed", "payload": {"status": "lobby"}},
         )
     await broadcast_public_room_change(room_id)
     return out
@@ -472,11 +506,7 @@ async def change_phase(
         room = await load_room_or_404(conn, room_id)
         await assert_leader(room, user_id)
 
-    settings = RoomSettings.model_validate(
-        room["settings"]
-        if isinstance(room["settings"], dict)
-        else json.loads(room["settings"])
-    )
+    settings = decode_settings(room["settings"])
     is_random = settings.game_mode == "random"
     transitions = _RANDOM_TRANSITIONS if is_random else _CLASSIC_TRANSITIONS
     if target not in transitions.get(room["status"], set()):
@@ -613,28 +643,35 @@ async def change_phase(
                 await conn.execute(
                     "DELETE FROM room_songs WHERE room_id = $1", room["id"]
                 )
+                rows = []
                 for i, track in enumerate(random_tracks):
                     cand = deezer.serialize_candidate(track)
-                    await conn.execute(
-                        """
-                        INSERT INTO room_songs
-                            (room_id, spotify_track_id, title, title_normalized,
-                             artist, album, preview_url, album_image_url,
-                             duration_ms, popularity, play_order)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                        """,
-                        room["id"],
-                        cand["spotify_track_id"],
-                        cand["title"],
-                        normalize_title(cand["title"]),
-                        cand["artist"],
-                        cand.get("album"),
-                        cand["preview_url"],
-                        cand["album_image_url"],
-                        cand["duration_ms"],
-                        cand["popularity"],
-                        i,
+                    rows.append(
+                        (
+                            room["id"],
+                            cand["track_id"],
+                            cand["title"],
+                            normalize_title(cand["title"]),
+                            cand["artist"],
+                            cand.get("album"),
+                            cand["preview_url"],
+                            cand["album_image_url"],
+                            cand["duration_ms"],
+                            cand["popularity"],
+                            i,
+                        )
                     )
+                # One round-trip via executemany rather than N inserts.
+                await conn.executemany(
+                    """
+                    INSERT INTO room_songs
+                        (room_id, track_id, title, title_normalized,
+                         artist, album, preview_url, album_image_url,
+                         duration_ms, popularity, play_order)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    """,
+                    rows,
+                )
 
             await conn.execute(
                 "UPDATE rooms SET status = $1 WHERE id = $2",
@@ -648,6 +685,12 @@ async def change_phase(
                     "UPDATE room_players SET spectating = FALSE WHERE room_id = $1",
                     room["id"],
                 )
+                if room["status"] == "selecting":
+                    # Bailing out of song picking — wipe the half-built
+                    # queue so the next selecting phase starts clean.
+                    await conn.execute(
+                        "DELETE FROM room_songs WHERE room_id = $1", room["id"]
+                    )
             room = await load_room_or_404(conn, room_id)
             out = await build_room_out(conn, room)
 
@@ -718,11 +761,12 @@ async def kick_player(
     target_user_id: UUID,
     user_id: UUID = Depends(auth.get_current_user_id),
 ) -> Response:
+    fell_back_to_lobby = False
     async with db.pool().acquire() as conn:
         async with conn.transaction():
             room = await load_room_or_404(conn, room_id)
             await assert_leader(room, user_id)
-            await assert_status(room, "lobby")
+            await assert_status(room, "lobby", "selecting")
             if target_user_id == user_id:
                 raise HTTPException(
                     status.HTTP_400_BAD_REQUEST,
@@ -747,6 +791,8 @@ async def kick_player(
             now_empty, new_leader = await remove_player_from_room(
                 conn, room, target_user_id
             )
+            if not now_empty:
+                fell_back_to_lobby = await _maybe_fallback_to_lobby(conn, room["id"])
 
     await state.hub.broadcast(
         room_key(room),
@@ -756,6 +802,11 @@ async def kick_player(
         await state.hub.broadcast(
             room_key(room),
             {"type": "leader_changed", "payload": {"leader_id": str(new_leader)}},
+        )
+    if fell_back_to_lobby:
+        await state.hub.broadcast(
+            room_key(room),
+            {"type": "phase_changed", "payload": {"status": "lobby"}},
         )
     if now_empty:
         schedule_empty_room_cleanup(room["id"])
@@ -795,7 +846,7 @@ async def my_songs(
         room = await load_room_or_404(conn, room_id)
         rows = await conn.fetch(
             """
-            SELECT rs.id, rs.spotify_track_id, rs.title, rs.artist,
+            SELECT rs.id, rs.track_id, rs.title, rs.artist,
                    rs.preview_url, rs.album_image_url
             FROM room_song_pickers rsp
             JOIN room_songs rs ON rs.id = rsp.song_id
@@ -814,32 +865,14 @@ async def submit_song(
     req: SubmitSongRequest,
     user_id: UUID = Depends(auth.get_current_user_id),
 ) -> SubmittedSongOut:
+    # Load + validate room/settings outside the transaction so we can call
+    # Deezer without sitting on a row lock.
     async with db.pool().acquire() as conn:
         room = await load_room_or_404(conn, room_id)
         await assert_status(room, "selecting")
+        settings = decode_settings(room["settings"])
 
-        settings = RoomSettings.model_validate(
-            room["settings"]
-            if isinstance(room["settings"], dict)
-            else json.loads(room["settings"])
-        )
-
-        already = await conn.fetchval(
-            "SELECT count(*)::int FROM room_song_pickers "
-            "WHERE room_id = $1 AND user_id = $2",
-            room["id"],
-            user_id,
-        )
-        if already >= settings.songs_per_player:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "quota_reached",
-                    "message": "you've already submitted enough songs",
-                },
-            )
-
-    track = await deezer.get_track(req.spotify_track_id)
+    track = await deezer.get_track(req.track_id)
     ok, reason = deezer.matches_rules(track, settings.model_dump())
     if not ok:
         raise HTTPException(
@@ -852,16 +885,49 @@ async def submit_song(
 
     candidate = deezer.serialize_candidate(track)
 
+    # Quota check + insert in one transaction, behind a per-(room, user)
+    # advisory lock so two parallel submissions from the same user can't
+    # both pass the count check and exceed `songs_per_player`.
     async with db.pool().acquire() as conn:
         async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
+                str(room["id"]),
+                str(user_id),
+            )
+            current_status = await conn.fetchval(
+                "SELECT status FROM rooms WHERE id = $1", room["id"]
+            )
+            if current_status != "selecting":
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "wrong_phase",
+                        "message": "selecting phase ended before submission landed",
+                    },
+                )
+            already = await conn.fetchval(
+                "SELECT count(*)::int FROM room_song_pickers "
+                "WHERE room_id = $1 AND user_id = $2",
+                room["id"],
+                user_id,
+            )
+            if already >= settings.songs_per_player:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "quota_reached",
+                        "message": "you've already submitted enough songs",
+                    },
+                )
             existing = await conn.fetchrow(
                 """
-                SELECT id, spotify_track_id, title, artist, preview_url, album_image_url
+                SELECT id, track_id, title, artist, preview_url, album_image_url
                 FROM room_songs
-                WHERE room_id = $1 AND spotify_track_id = $2
+                WHERE room_id = $1 AND track_id = $2
                 """,
                 room["id"],
-                req.spotify_track_id,
+                req.track_id,
             )
             if existing is None:
                 order_row = await conn.fetchval(
@@ -871,14 +937,14 @@ async def submit_song(
                 row = await conn.fetchrow(
                     """
                     INSERT INTO room_songs
-                        (room_id, spotify_track_id, title, title_normalized,
+                        (room_id, track_id, title, title_normalized,
                          artist, album, preview_url, album_image_url,
                          duration_ms, popularity, play_order)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                    RETURNING id, spotify_track_id, title, artist, preview_url, album_image_url
+                    RETURNING id, track_id, title, artist, preview_url, album_image_url
                     """,
                     room["id"],
-                    req.spotify_track_id,
+                    req.track_id,
                     candidate["title"],
                     normalize_title(candidate["title"]),
                     candidate["artist"],
@@ -907,12 +973,13 @@ async def submit_song(
                         "message": "you've already picked this track",
                     },
                 )
+            new_count = already + 1
 
     await state.hub.broadcast(
         room_key(room),
         {
             "type": "song_submitted",
-            "payload": {"user_id": str(user_id), "count": already + 1},
+            "payload": {"user_id": str(user_id), "count": new_count},
         },
     )
     return SubmittedSongOut(**dict(row))

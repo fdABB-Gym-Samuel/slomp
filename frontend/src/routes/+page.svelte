@@ -3,6 +3,7 @@
   import { goto } from '$app/navigation';
   import { api, APIError } from '$lib/api';
   import { auth } from '$lib/auth.svelte';
+  import { wsBase } from '$lib/url';
   import type { PublicRoom, RoomStatus } from '$lib/types';
 
   type ModalAction =
@@ -111,11 +112,7 @@
   let lobbyPing: ReturnType<typeof setInterval> | null = null;
 
   function openLobbyWs() {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsHost =
-      location.port === '5173' ? `${location.hostname}:8000` : location.host;
-    const url = `${proto}//${wsHost}/lobby/ws`;
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(`${wsBase()}/lobby/ws`);
     lobbyWs = ws;
 
     ws.onmessage = (e) => {

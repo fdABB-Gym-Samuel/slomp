@@ -170,7 +170,7 @@
 
   <div class:hidden={activeTab !== 'players'}>
     <div class="grid gap-6 md:grid-cols-[2fr_1fr]">
-      <div class="card">
+      <div class="card min-w-0">
         <h2 class="mb-3 text-lg font-semibold">
           Players <span class="text-text-muted">({roomData.players.length})</span>
         </h2>

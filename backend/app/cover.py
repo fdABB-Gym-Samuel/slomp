@@ -10,17 +10,30 @@ import asyncio
 import hashlib
 import io
 from typing import Literal
+from urllib.parse import urlparse
 
-import httpx
 from PIL import Image, ImageFilter
 
-from . import cache
+from . import cache, http as http_client
 
 ObscureMode = Literal["blur", "pixelate"]
 
 _HTTP_TIMEOUT_SECONDS = 10.0
 _ORIGINAL_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 days — covers are immutable
 _RENDERED_TTL_SECONDS = 60 * 60 * 24  # 1 day — cheap to re-derive
+
+# See `audio._assert_allowed_host` — the URL space here is also Deezer's
+# CDN; the allowlist defends against an upstream that hands us an internal
+# URL.
+_ALLOWED_HOST_SUFFIXES = (".dzcdn.net",)
+
+
+def _assert_allowed_host(url: str) -> None:
+    host = (urlparse(url).hostname or "").lower()
+    if not any(
+        host == s.lstrip(".") or host.endswith(s) for s in _ALLOWED_HOST_SUFFIXES
+    ):
+        raise ValueError(f"refusing to fetch unallowed host: {host!r}")
 
 
 def _url_hash(url: str) -> str:
@@ -33,10 +46,12 @@ async def _fetch_original(url: str) -> bytes:
     cached = await rc.get(key)
     if cached is not None:
         return cached
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:
-        resp = await client.get(url, follow_redirects=True)
-        resp.raise_for_status()
-        raw = resp.content
+    _assert_allowed_host(url)
+    resp = await http_client.client().get(
+        url, follow_redirects=True, timeout=_HTTP_TIMEOUT_SECONDS
+    )
+    resp.raise_for_status()
+    raw = resp.content
     await rc.set(key, raw, ex=_ORIGINAL_TTL_SECONDS)
     return raw
 

@@ -158,13 +158,6 @@
         {/if}
       </div>
       <div class="flex items-center gap-3 text-sm text-text-secondary">
-        {#if showSubmissions && songsPerPlayer}
-          <span class:text-success={p.songs_submitted >= songsPerPlayer}>
-            {p.songs_submitted} / {songsPerPlayer}
-          </span>
-        {:else}
-          <span>{p.score} pts</span>
-        {/if}
         {#if showLeaderActions && p.user.id !== leaderId}
           {#if onPromote}
             <button
@@ -186,6 +179,16 @@
               Kick
             </button>
           {/if}
+        {/if}
+        {#if showSubmissions && songsPerPlayer}
+          <span
+            class="w-12 text-right tabular-nums"
+            class:text-success={p.songs_submitted >= songsPerPlayer}
+          >
+            {p.songs_submitted} / {songsPerPlayer}
+          </span>
+        {:else}
+          <span class="w-14 text-right tabular-nums">{p.score} pts</span>
         {/if}
       </div>
     </li>

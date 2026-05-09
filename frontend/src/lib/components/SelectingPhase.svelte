@@ -2,6 +2,7 @@
   import { api, APIError } from '$lib/api';
   import { searchSongs } from '$lib/deezer';
   import { auth } from '$lib/auth.svelte';
+  import { confirmDialog } from '$lib/confirm.svelte';
   import type { Room, SongCandidate, SubmittedSong } from '$lib/types';
   import PlayerList from './PlayerList.svelte';
 
@@ -14,13 +15,15 @@
   let submitting = $state<string | null>(null);
   let error = $state<string | null>(null);
   let starting = $state(false);
+  let backing = $state(false);
+  let playerError = $state<string | null>(null);
   let highlightedIndex = $state(0);
   let resultListEl: HTMLUListElement | null = $state(null);
 
   // Inline preview player for the picking phase. Plays Deezer's preview MP3
   // straight from cdnt-preview.dzcdn.net so no audio bytes go through our
-  // backend. One shared <audio> element; `previewPlayingId` is the
-  // spotify_track_id (Deezer id) of whatever's currently audible.
+  // backend. One shared <audio> element; `previewPlayingId` is the Deezer
+  // track id of whatever's currently audible.
   let audio: HTMLAudioElement | null = $state(null);
   let previewPlayingId = $state<string | null>(null);
 
@@ -84,7 +87,7 @@
       if (submitting !== null) return;
       const r = results[highlightedIndex];
       if (!r) return;
-      if (mySongs.some((m) => m.spotify_track_id === r.spotify_track_id)) return;
+      if (mySongs.some((m) => m.track_id === r.track_id)) return;
       submit(r);
     }
   }
@@ -119,11 +122,11 @@
   });
 
   async function submit(track: SongCandidate) {
-    submitting = track.spotify_track_id;
+    submitting = track.track_id;
     error = null;
-    if (audio && previewPlayingId === track.spotify_track_id) audio.pause();
+    if (audio && previewPlayingId === track.track_id) audio.pause();
     try {
-      await api.submitSong(roomData.id, track.spotify_track_id);
+      await api.submitSong(roomData.id, track.track_id);
       await loadMine();
     } catch (e) {
       error = e instanceof APIError ? e.message : String(e);
@@ -134,7 +137,7 @@
 
   async function remove(songId: string) {
     const target = mySongs.find((m) => m.id === songId);
-    if (audio && target && previewPlayingId === target.spotify_track_id) {
+    if (audio && target && previewPlayingId === target.track_id) {
       audio.pause();
     }
     try {
@@ -156,10 +159,45 @@
       starting = false;
     }
   }
+
+  async function backToLobby() {
+    const ok = await confirmDialog({
+      title: 'Back to lobby?',
+      body: "Everyone's picks will be discarded.",
+      confirmLabel: 'Back to lobby',
+      danger: true,
+    });
+    if (!ok) return;
+    backing = true;
+    error = null;
+    try {
+      await api.changePhase(roomData.id, 'lobby');
+    } catch (e) {
+      error = e instanceof APIError ? e.message : String(e);
+    } finally {
+      backing = false;
+    }
+  }
+
+  async function kick(userId: string, username: string) {
+    const ok = await confirmDialog({
+      title: `Kick ${username}?`,
+      body: 'They will be removed from the room.',
+      confirmLabel: 'Kick',
+      danger: true,
+    });
+    if (!ok) return;
+    playerError = null;
+    try {
+      await api.kickPlayer(roomData.id, userId);
+    } catch (e) {
+      playerError = e instanceof APIError ? e.message : String(e);
+    }
+  }
 </script>
 
 <div class="grid gap-6 md:grid-cols-[2fr_1fr]">
-  <div class="space-y-4">
+  <div class="min-w-0 space-y-4">
     {#if isSpectator}
       <div class="card text-center">
         <h2 class="text-lg font-semibold">You joined mid-game</h2>
@@ -189,7 +227,7 @@
       {/if}
       {#if results.length > 0 && mySongs.length < quota}
         <ul bind:this={resultListEl} class="mt-4 space-y-2">
-          {#each results as r, i (r.spotify_track_id)}
+          {#each results as r, i (r.track_id)}
             <li
               class="flex items-center gap-3 rounded-md border bg-surface-raised p-3"
               class:border-accent={highlightedIndex === i}
@@ -202,13 +240,13 @@
                   <div class="h-full w-full bg-surface"></div>
                 {/if}
                 {#if r.preview_url}
-                  {@const isPlaying = previewPlayingId === r.spotify_track_id}
+                  {@const isPlaying = previewPlayingId === r.track_id}
                   <button
                     type="button"
                     class="absolute inset-0 flex items-center justify-center bg-black/50 text-white transition-opacity hover:opacity-100 focus:opacity-100"
                     class:opacity-0={!isPlaying}
                     class:opacity-100={isPlaying}
-                    onclick={() => togglePreview(r.spotify_track_id, r.preview_url)}
+                    onclick={() => togglePreview(r.track_id, r.preview_url)}
                     aria-label={isPlaying ? 'Pause preview' : 'Play preview'}
                   >
                     {#if isPlaying}
@@ -234,10 +272,10 @@
               <button
                 class="btn-secondary flex-shrink-0 text-sm"
                 disabled={submitting !== null ||
-                  mySongs.some((m) => m.spotify_track_id === r.spotify_track_id)}
+                  mySongs.some((m) => m.track_id === r.track_id)}
                 onclick={() => submit(r)}
               >
-                {submitting === r.spotify_track_id ? 'Adding…' : 'Pick'}
+                {submitting === r.track_id ? 'Adding…' : 'Pick'}
               </button>
             </li>
           {/each}
@@ -262,13 +300,13 @@
                   <div class="h-full w-full bg-surface"></div>
                 {/if}
                 {#if s.preview_url}
-                  {@const isPlaying = previewPlayingId === s.spotify_track_id}
+                  {@const isPlaying = previewPlayingId === s.track_id}
                   <button
                     type="button"
                     class="absolute inset-0 flex items-center justify-center bg-black/50 text-white transition-opacity hover:opacity-100 focus:opacity-100"
                     class:opacity-0={!isPlaying}
                     class:opacity-100={isPlaying}
-                    onclick={() => togglePreview(s.spotify_track_id, s.preview_url)}
+                    onclick={() => togglePreview(s.track_id, s.preview_url)}
                     aria-label={isPlaying ? 'Pause preview' : 'Play preview'}
                   >
                     {#if isPlaying}
@@ -301,7 +339,7 @@
     {/if}
   </div>
 
-  <div class="space-y-4">
+  <div class="min-w-0 space-y-4">
     <div class="card">
       <h2 class="mb-3 text-lg font-semibold">Players</h2>
       <PlayerList
@@ -311,13 +349,18 @@
         showSubmissions
         highlightUserId={auth.user?.id ?? null}
         roomId={roomData.id}
+        showLeaderActions={isLeader}
+        onKick={kick}
       />
+      {#if playerError}
+        <p class="mt-3 text-sm text-danger">{playerError}</p>
+      {/if}
     </div>
 
     {#if isLeader}
       <button
         class="btn-primary w-full"
-        disabled={starting || !allReady || !enoughActive}
+        disabled={starting || backing || !allReady || !enoughActive}
         onclick={startGame}
         title={!enoughActive
           ? 'need at least 2 active players (spectators don\'t count)'
@@ -332,6 +375,13 @@
             : !allReady
               ? 'Waiting for picks'
               : 'Start the game'}
+      </button>
+      <button
+        class="btn-ghost w-full text-sm text-danger"
+        disabled={starting || backing}
+        onclick={backToLobby}
+      >
+        {backing ? 'Returning…' : 'Back to lobby'}
       </button>
     {/if}
   </div>

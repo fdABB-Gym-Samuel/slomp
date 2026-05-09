@@ -1,18 +1,15 @@
 """Music catalog client.
 
-Despite the module name, this calls **Deezer's** public API rather than
-Spotify. The original Spotify Client-Credentials path was abandoned in late
-2024 after Spotify silently stripped `preview_url`, `popularity`, and `genres`
-from non-extended-quota apps — making the entire game premise (play 30-second
-clips, gate by popularity) impossible.
+This calls **Deezer's** public API. The original Spotify Client-Credentials
+path was abandoned in late 2024 after Spotify silently stripped
+`preview_url`, `popularity`, and `genres` from non-extended-quota apps —
+making the entire game premise (play 30-second clips, gate by popularity)
+impossible.
 
 Deezer offers what we need with no auth required:
   - `/search?q=...`         tracks with `preview` (30s MP3) and `rank` (popularity-ish)
   - `/search/artist?q=...`  artists with id, name, picture URLs
   - `/track/{id}`           full track including preview
-
-The module name is unchanged to minimise churn elsewhere — column names and
-fields like `spotify_track_id` now hold Deezer integer IDs (as strings).
 """
 
 import asyncio
@@ -22,6 +19,7 @@ from typing import Any
 
 import httpx
 
+from app import http as http_client
 from app.matching import normalize_artist, normalize_title
 
 logger = logging.getLogger("slomp.music")
@@ -30,27 +28,26 @@ _API = "https://api.deezer.com"
 
 
 async def _api_get(path: str, params: dict | None = None) -> Any:
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(f"{_API}{path}", params=params)
-        if resp.status_code >= 400:
-            logger.error(
-                "deezer GET %s -> %s body=%s",
-                resp.request.url,
-                resp.status_code,
-                resp.text[:500],
-            )
-        resp.raise_for_status()
-        data = resp.json()
-        # Deezer signals errors with HTTP 200 + {"error": {...}} body
-        if isinstance(data, dict) and data.get("error"):
-            err = data["error"]
-            logger.error("deezer api error %s: %s", err.get("code"), err.get("message"))
-            raise httpx.HTTPStatusError(
-                f"Deezer error {err.get('code')}: {err.get('message')}",
-                request=resp.request,
-                response=resp,
-            )
-        return data
+    resp = await http_client.client().get(f"{_API}{path}", params=params, timeout=10.0)
+    if resp.status_code >= 400:
+        logger.error(
+            "deezer GET %s -> %s body=%s",
+            resp.request.url,
+            resp.status_code,
+            resp.text[:500],
+        )
+    resp.raise_for_status()
+    data = resp.json()
+    # Deezer signals errors with HTTP 200 + {"error": {...}} body
+    if isinstance(data, dict) and data.get("error"):
+        err = data["error"]
+        logger.error("deezer api error %s: %s", err.get("code"), err.get("message"))
+        raise httpx.HTTPStatusError(
+            f"Deezer error {err.get('code')}: {err.get('message')}",
+            request=resp.request,
+            response=resp,
+        )
+    return data
 
 
 async def search_tracks(query: str, limit: int = 10) -> list[dict]:
@@ -133,16 +130,22 @@ async def fetch_random_tracks(min_popularity: int, count: int) -> list[dict]:
                 return r
         return None
 
+    # Resolve with a bounded concurrency window (so we don't smash Deezer's
+    # rate limit) but consume in completion order — earlier chunks no
+    # longer block later ones, and the moment we've accepted `count`
+    # tracks we cancel the in-flight tail.
+    sem = asyncio.Semaphore(25)
+
+    async def _bounded_resolve(t: dict) -> dict | None:
+        async with sem:
+            return await _resolve(t)
+
+    tasks = [asyncio.create_task(_bounded_resolve(t)) for t in candidates]
     accepted: list[dict] = []
     seen_accepted: set = set()
-    chunk = 25
-    for i in range(0, len(candidates), chunk):
-        if len(accepted) >= count:
-            break
-        resolved = await asyncio.gather(
-            *(_resolve(t) for t in candidates[i : i + chunk])
-        )
-        for r in resolved:
+    try:
+        for fut in asyncio.as_completed(tasks):
+            r = await fut
             if r is None:
                 continue
             tid = r.get("id")
@@ -152,6 +155,13 @@ async def fetch_random_tracks(min_popularity: int, count: int) -> list[dict]:
             accepted.append(r)
             if len(accepted) >= count:
                 break
+    finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        # Drain so cancellations don't surface as "Task was destroyed
+        # but it is pending!" warnings.
+        await asyncio.gather(*tasks, return_exceptions=True)
     return accepted[:count]
 
 
@@ -197,7 +207,7 @@ def serialize_candidate(track: dict) -> dict:
     rank = track.get("rank") or 0
     duration_seconds = track.get("duration") or 0
     return {
-        "spotify_track_id": str(track["id"]),  # field-name vestigial; holds Deezer id
+        "track_id": str(track["id"]),
         "title": track.get("title", ""),
         "artist": artist.get("name", ""),
         "album": album.get("title"),

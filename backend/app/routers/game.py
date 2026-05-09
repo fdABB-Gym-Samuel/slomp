@@ -1,4 +1,3 @@
-import json
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -9,7 +8,7 @@ from ..models import (
     GuessResultOut,
     SkipRequest,
     SkipResultOut,
-    serialize_settings,
+    decode_settings,
 )
 from ..rooms_helpers import room_key
 
@@ -90,8 +89,8 @@ async def get_round_audio(
         )
 
     bracket_seconds = active.brackets[player.bracket_index]
-    full = await audio.fetch_full(active.spotify_track_id, active.preview_url)
-    sliced = await audio.slice_audio(full, bracket_seconds)
+    full = await audio.fetch_full(active.track_id, active.preview_url)
+    sliced = await audio.get_slice(active.track_id, full, bracket_seconds)
 
     return Response(
         content=sliced,
@@ -112,7 +111,7 @@ async def get_round_full_audio(
     async with db.pool().acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT rs.spotify_track_id, rs.preview_url, rnd.ended_at
+            SELECT rs.track_id, rs.preview_url, rnd.ended_at
             FROM rounds rnd
             JOIN room_songs rs ON rs.id = rnd.song_id
             JOIN rooms r ON r.id = rnd.room_id
@@ -140,7 +139,7 @@ async def get_round_full_audio(
             detail={"code": "no_preview", "message": "this song has no preview audio"},
         )
 
-    full = await audio.fetch_full(row["spotify_track_id"], row["preview_url"])
+    full = await audio.fetch_full(row["track_id"], row["preview_url"])
     return Response(
         content=full,
         media_type="audio/mpeg",
@@ -157,12 +156,7 @@ def _obscure_intensity_for_player(
     Picker, finished players, and spectators all see sharp; active guessers
     get the configured schedule (or a mode-specific default linear ramp
     when none is set)."""
-    raw = (
-        json.loads(settings_raw)
-        if isinstance(settings_raw, str)
-        else (settings_raw or {})
-    )
-    settings = serialize_settings(raw)
+    settings = decode_settings(settings_raw)
     mode = settings.album_art_obscure_mode
     # Sharp value depends on mode: blur radius 0 is identity, but pixelate
     # treats 0 as a 1×1 mosaic — clamp to the source side length so the

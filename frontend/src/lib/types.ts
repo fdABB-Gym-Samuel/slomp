@@ -64,7 +64,7 @@ export interface PublicRoom {
 }
 
 export interface SongCandidate {
-  spotify_track_id: string;
+  track_id: string;
   title: string;
   artist: string;
   album?: string | null;
@@ -76,7 +76,7 @@ export interface SongCandidate {
 
 export interface SubmittedSong {
   id: string;
-  spotify_track_id: string;
+  track_id: string;
   title: string;
   artist: string;
   preview_url: string | null;

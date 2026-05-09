@@ -1,7 +1,6 @@
 """Shared helpers for the rooms router and the game module."""
 
 import asyncio
-import json
 import logging
 import secrets
 import time
@@ -11,7 +10,7 @@ import asyncpg
 from fastapi import HTTPException, status
 
 from . import db, state
-from .models import RoomOut, RoomPlayerOut, RoomSettings, UserOut, serialize_settings
+from .models import RoomOut, RoomPlayerOut, UserOut, decode_settings
 
 logger = logging.getLogger("slomp.rooms")
 
@@ -75,12 +74,6 @@ async def assert_status(room: asyncpg.Record, *allowed: str) -> None:
                 "message": f"action requires phase {allowed}, currently {room['status']}",
             },
         )
-
-
-def _decode_settings(raw) -> RoomSettings:
-    if isinstance(raw, str):
-        return serialize_settings(json.loads(raw))
-    return serialize_settings(raw or {})
 
 
 def room_key(room: asyncpg.Record | UUID) -> str:
@@ -196,18 +189,27 @@ def clear_empty_room_cleanup(room_id: UUID) -> None:
 async def claim_orphaned_leadership(
     conn: asyncpg.Connection, room: asyncpg.Record, user_id: UUID
 ) -> UUID | None:
-    """If `room`'s recorded leader is no longer a member (e.g., they left
-    during the empty-room cleanup window and someone else just joined),
-    promote `user_id` to leader. Must be called inside a transaction
-    *after* `user_id` has been inserted into room_players. Returns the
-    new leader id when a transfer happened, else None."""
-    leader_present = await conn.fetchval(
-        "SELECT 1 FROM room_players WHERE room_id = $1 AND user_id = $2",
-        room["id"],
-        room["leader_id"],
+    """If the room's leader is missing or no longer a member (e.g., they
+    left during the empty-room cleanup window and someone else just joined),
+    promote `user_id` to leader. Must be called inside a transaction *after*
+    `user_id` has been inserted into room_players. Returns the new leader id
+    when a transfer happened, else None.
+
+    The leader_id is re-read from the DB rather than read off the in-memory
+    `room` record, since `_wipe_existing_identity` may have already deleted
+    the prior leader and (via `ON DELETE SET NULL`) cleared `leader_id`
+    underneath us."""
+    current_leader = await conn.fetchval(
+        "SELECT leader_id FROM rooms WHERE id = $1", room["id"]
     )
-    if leader_present:
-        return None
+    if current_leader is not None:
+        leader_present = await conn.fetchval(
+            "SELECT 1 FROM room_players WHERE room_id = $1 AND user_id = $2",
+            room["id"],
+            current_leader,
+        )
+        if leader_present:
+            return None
     await conn.execute(
         "UPDATE rooms SET leader_id = $1 WHERE id = $2",
         user_id,
@@ -228,14 +230,11 @@ _PUBLIC_ROOM_QUERY = """
 
 
 def _public_room_payload(row: asyncpg.Record) -> dict:
-    raw = row["settings"]
-    if isinstance(raw, str):
-        raw = json.loads(raw)
-    settings = raw or {}
-    spp = settings.get("songs_per_player", 3)
-    rsc = settings.get("random_song_count", 10)
-    locked = bool(settings.get("lock_after_lobby", False))
-    game_mode = settings.get("game_mode", "classic")
+    settings = decode_settings(row["settings"])
+    spp = settings.songs_per_player
+    rsc = settings.random_song_count
+    locked = settings.lock_after_lobby
+    game_mode = settings.game_mode
     # When `lock_after_lobby` is on and the game has left the lobby, joining
     # is still allowed but the new player sits out until the current game
     # finishes. The browser surfaces this so the user knows what they're
@@ -303,25 +302,25 @@ async def leave_other_rooms(
     Must be called inside a transaction. Returns a list of
     (room_key, room_now_empty, new_leader_id, room_id) the caller should
     broadcast and act on after the transaction commits."""
+    # Load every affected room in one query, then iterate. The previous
+    # version did one fetchrow per room id (N+1) — almost always N=0 or 1
+    # since a user can only be in one room at a time, but the loop pattern
+    # invited misuse if anything ever changed.
     if except_room_id is None:
-        rows = await conn.fetch(
-            "SELECT room_id FROM room_players WHERE user_id = $1",
+        rooms = await conn.fetch(
+            f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE id IN ("
+            "SELECT room_id FROM room_players WHERE user_id = $1)",
             user_id,
         )
     else:
-        rows = await conn.fetch(
-            "SELECT room_id FROM room_players WHERE user_id = $1 AND room_id <> $2",
+        rooms = await conn.fetch(
+            f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE id IN ("
+            "SELECT room_id FROM room_players WHERE user_id = $1 AND room_id <> $2)",
             user_id,
             except_room_id,
         )
     results: list[tuple[str, bool, UUID | None, UUID]] = []
-    for r in rows:
-        room = await conn.fetchrow(
-            f"SELECT {_ROOM_COLUMNS} FROM rooms WHERE id = $1",
-            r["room_id"],
-        )
-        if room is None:
-            continue
+    for room in rooms:
         now_empty, new_leader = await remove_player_from_room(conn, room, user_id)
         results.append((room_key(room), now_empty, new_leader, room["id"]))
     return results
@@ -396,7 +395,7 @@ async def build_room_out(conn: asyncpg.Connection, room: asyncpg.Record) -> Room
         is_public=room["is_public"],
         leader_id=room["leader_id"],
         status=room["status"],
-        settings=_decode_settings(room["settings"]),
+        settings=decode_settings(room["settings"]),
         players=players,
         current_round_id=current_round_id,
     )

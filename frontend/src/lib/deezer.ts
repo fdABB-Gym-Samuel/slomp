@@ -44,6 +44,8 @@ interface DeezerError {
   error?: { code: number | string; message: string; type?: string };
 }
 
+const JSONP_TIMEOUT_MS = 8_000;
+
 function jsonp<T>(
   path: string,
   params: Record<string, string | number> = {},
@@ -58,7 +60,9 @@ function jsonp<T>(
 
     const script = document.createElement("script");
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const cleanup = () => {
+      if (timer != null) clearTimeout(timer);
       delete (window as unknown as Record<string, unknown>)[cbName];
       script.remove();
     };
@@ -66,6 +70,7 @@ function jsonp<T>(
     (window as unknown as Record<string, (data: T & DeezerError) => void>)[
       cbName
     ] = (data) => {
+      if (settled) return;
       settled = true;
       cleanup();
       if (data && typeof data === "object" && "error" in data && data.error) {
@@ -77,9 +82,20 @@ function jsonp<T>(
 
     script.onerror = () => {
       if (settled) return;
+      settled = true;
       cleanup();
       reject(new Error("Deezer JSONP request failed"));
     };
+
+    // Without a hard timeout the script tag will hang forever if Deezer
+    // never responds (e.g. extension blocking the request) — and the
+    // caller's UI sits on a "searching…" spinner indefinitely.
+    timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("Deezer request timed out"));
+    }, JSONP_TIMEOUT_MS);
 
     script.src = `${API}${path}?${usp.toString()}`;
     document.head.appendChild(script);
@@ -191,7 +207,7 @@ function serializeCandidate(track: DeezerTrack): SongCandidate {
   const rank = track.rank ?? 0;
   const durationSec = track.duration ?? 0;
   return {
-    spotify_track_id: String(track.id),
+    track_id: String(track.id),
     title: track.title ?? "",
     artist: track.artist?.name ?? "",
     album: album.title ?? null,

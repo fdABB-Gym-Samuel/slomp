@@ -119,7 +119,15 @@
     lastResult = null;
     playbackSec = 0;
     srcBracket = null;
-    if (audio && !audio.paused) audio.pause();
+    if (audio) {
+      // Clear the src so any in-flight load for the previous round's URL
+      // is aborted. Otherwise the browser can keep fetching the old
+      // /rounds/<old>/audio after the round transitions and the server
+      // 404s it — surfacing as a NotSupportedError on the <audio> element.
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+    }
     playing = false;
   });
 
@@ -176,6 +184,15 @@
     try {
       await audio.play();
     } catch (e) {
+      // NotSupportedError fires when the audio response wasn't decodable —
+      // typically because the round transitioned between us setting src
+      // and the server slicing the bytes (the server returns a 404 JSON
+      // body, the <audio> element rejects it). Recover silently so the
+      // user can hit play again on the now-current round.
+      if (e instanceof DOMException && e.name === 'NotSupportedError') {
+        srcBracket = null;
+        return;
+      }
       error = String(e);
     }
   }
@@ -195,6 +212,17 @@
     playing = false;
     stopTracking();
     if (audio) playbackSec = audio.currentTime;
+  }
+
+  function onAudioError() {
+    // The <audio> element fires `error` independently of the play()
+    // promise — e.g., when a preload finishes after the round ended and
+    // the server 404s. Reset playback bookkeeping so the next togglePlayback
+    // refetches the current round's audio cleanly.
+    playing = false;
+    stopTracking();
+    srcBracket = null;
+    playbackSec = 0;
   }
 
   function onQueryInput() {
@@ -262,7 +290,7 @@
       const r = await api.guess(
         roomData.id,
         active.round_id,
-        track.spotify_track_id
+        track.track_id
       );
       if (room.activeRound?.round_id !== guessRoundId) return;
       lastResult = { correct: r.correct, points: r.points };
@@ -499,6 +527,7 @@
             onplay={onAudioPlay}
             onpause={onAudioPause}
             onended={onAudioEnded}
+            onerror={onAudioError}
           ></audio>
 
           {#if myFinished}
@@ -594,7 +623,7 @@
                 bind:this={resultListEl}
                 class="max-h-72 overflow-y-auto rounded-md border border-border bg-surface-raised"
               >
-                {#each searchResults as r, i (r.spotify_track_id)}
+                {#each searchResults as r, i (r.track_id)}
                   <li>
                     <button
                       type="button"

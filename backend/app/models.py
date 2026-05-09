@@ -1,3 +1,4 @@
+import json
 from typing import Literal
 from uuid import UUID
 
@@ -118,7 +119,7 @@ class PublicRoomOut(BaseModel):
 
 
 class SongCandidate(BaseModel):
-    spotify_track_id: str
+    track_id: str
     title: str
     artist: str
     album: str | None = None
@@ -129,12 +130,12 @@ class SongCandidate(BaseModel):
 
 
 class SubmitSongRequest(BaseModel):
-    spotify_track_id: str
+    track_id: str
 
 
 class SubmittedSongOut(BaseModel):
     id: UUID
-    spotify_track_id: str
+    track_id: str
     title: str
     artist: str
     preview_url: str | None
@@ -173,3 +174,15 @@ def serialize_settings(raw: dict | None) -> RoomSettings:
     if raw is None:
         return RoomSettings()
     return RoomSettings.model_validate(raw)
+
+
+def decode_settings(raw: object) -> RoomSettings:
+    """Resolve a row's `settings` column to a typed `RoomSettings`. The
+    asyncpg JSONB codec (see `db._init_connection`) already returns dicts,
+    so this is just `serialize_settings(raw or {})` plus a sanity guard for
+    the (rare) case that a caller hands us a JSON string anyway."""
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    if isinstance(raw, dict):
+        return serialize_settings(raw)
+    return RoomSettings()

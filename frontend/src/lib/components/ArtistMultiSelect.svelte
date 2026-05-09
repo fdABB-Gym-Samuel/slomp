@@ -143,7 +143,7 @@
   {#if !readonly}
   <input
     class="input text-sm"
-    placeholder="search Spotify for an artist…"
+    placeholder="search Deezer for an artist…"
     bind:value={query}
     oninput={onInput}
     onkeydown={onSearchKeyDown}
@@ -160,7 +160,7 @@
   {#if results.length > 0}
     <ul
       bind:this={resultListEl}
-      class="mt-2 max-h-48 overflow-y-auto rounded-md border border-border bg-surface-raised"
+      class="mt-2 max-h-48 overflow-y-auto overflow-x-hidden rounded-md border border-border bg-surface-raised"
     >
       {#each results as a, i (a.id)}
         <li>

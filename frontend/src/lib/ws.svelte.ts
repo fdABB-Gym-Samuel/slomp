@@ -1,10 +1,11 @@
-import { api } from "./api";
 import { auth } from "./auth.svelte";
+import { wsBase } from "./url";
 import type {
   ActiveRoundInfo,
   MyAttempt,
   PickerAttempt,
   Room,
+  RoomPlayer,
   ScoreboardEntry,
 } from "./types";
 
@@ -50,17 +51,7 @@ class RoomConnection {
 
   private _open() {
     if (!this.roomId || !this.wantConnected) return;
-    const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    // In dev (vite on :5173), bypass vite's WS proxy and hit the backend
-    // directly on :8000. Vite's WS proxy is unreliable when combined with
-    // HMR + overlapping HTTP/WS prefixes. Cookies on localhost are not
-    // port-scoped, so the session cookie set via the vite-proxied join/
-    // create-room calls is also sent on the direct backend connection. In
-    // prod, frontend and backend share an origin via a real reverse proxy.
-    const wsHost =
-      location.port === "5173" ? `${location.hostname}:8000` : location.host;
-    const url = `${proto}//${wsHost}/rooms/${this.roomId}/ws`;
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(`${wsBase()}/rooms/${this.roomId}/ws`);
     this.ws = ws;
 
     ws.onmessage = (e) => {
@@ -113,15 +104,6 @@ class RoomConnection {
     this.finalScoreboard = null;
   }
 
-  private async _refetchRoom() {
-    if (!this.roomId) return;
-    try {
-      this.room = await api.getRoom(this.roomId);
-    } catch (e) {
-      console.error("failed to refetch room", e);
-    }
-  }
-
   private _handle(ev: WSEvent) {
     switch (ev.type) {
       case "room_state":
@@ -131,15 +113,21 @@ class RoomConnection {
 
       case "player_joined":
         if (this.room) {
-          const p = this.room.players.find(
+          const existing = this.room.players.find(
             (x) => x.user.id === ev.payload.user_id,
           );
-          if (p) {
-            p.connected = true;
-            p.auto_leave_at = null;
+          if (existing) {
+            existing.connected = true;
+            existing.auto_leave_at = null;
+          } else if (ev.payload.player) {
+            // Server now ships the full player record so we can upsert
+            // without a refetch (which could race subsequent WS events).
+            this.room.players = [
+              ...this.room.players,
+              ev.payload.player as RoomPlayer,
+            ];
           }
         }
-        this._refetchRoom();
         break;
 
       case "player_disconnected":
@@ -155,15 +143,21 @@ class RoomConnection {
         break;
 
       case "player_left":
-        this._refetchRoom();
+        if (this.room) {
+          this.room.players = this.room.players.filter(
+            (p) => p.user.id !== ev.payload.user_id,
+          );
+        }
         break;
 
       case "player_kicked":
         if (auth.user && ev.payload.user_id === auth.user.id) {
           this.disconnect();
           this.kickedSelf = true;
-        } else {
-          this._refetchRoom();
+        } else if (this.room) {
+          this.room.players = this.room.players.filter(
+            (p) => p.user.id !== ev.payload.user_id,
+          );
         }
         break;
 

@@ -195,9 +195,9 @@ components:
 
     SongCandidate:
       type: object
-      required: [spotify_track_id, title, artist]
+      required: [track_id, title, artist]
       properties:
-        spotify_track_id: { type: string }
+        track_id: { type: string }
         title: { type: string }
         artist: { type: string }
         album: { type: string }
@@ -208,10 +208,10 @@ components:
 
     SubmittedSong:
       type: object
-      required: [id, spotify_track_id, title, artist]
+      required: [id, track_id, title, artist]
       properties:
         id: { type: string, format: uuid }
-        spotify_track_id: { type: string }
+        track_id: { type: string }
         title: { type: string }
         artist: { type: string }
         preview_url: { type: string, nullable: true }
@@ -512,9 +512,9 @@ paths:
           application/json:
             schema:
               type: object
-              required: [spotify_track_id]
+              required: [track_id]
               properties:
-                spotify_track_id: { type: string }
+                track_id: { type: string }
       responses:
         "201":
           description: Accepted
@@ -635,9 +635,9 @@ paths:
         Server-side flow:
           1. Look up the caller's `bracket_index` in the round state.
           2. Resolve cached full-length audio from Valkey
-             (key: `audio:<spotify_track_id>`). On miss: fetch the preview
-             from Spotify's CDN, strip ID3 tags with `mutagen`, store the
-             cleaned bytes in Valkey, then continue.
+             (key: `audio:<track_id>`). On miss: fetch the preview from
+             Deezer's CDN, strip ID3 tags, store the cleaned bytes in
+             Valkey, then continue.
           3. Slice to `guess_brackets_seconds[bracket_index]` seconds with
              pydub/ffmpeg and stream as `audio/mpeg`.
 

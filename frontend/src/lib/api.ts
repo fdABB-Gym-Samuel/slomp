@@ -115,10 +115,10 @@ export const api = {
     request<void>(`/rooms/${id}/players/${userId}`, { method: "DELETE" }),
 
   mySongs: (id: string) => request<SubmittedSong[]>(`/rooms/${id}/songs`),
-  submitSong: (id: string, spotifyTrackId: string) =>
+  submitSong: (id: string, trackId: string) =>
     request<SubmittedSong>(`/rooms/${id}/songs`, {
       method: "POST",
-      body: JSON.stringify({ spotify_track_id: spotifyTrackId }),
+      body: JSON.stringify({ track_id: trackId }),
     }),
   deleteSong: (id: string, songId: string) =>
     request<void>(`/rooms/${id}/songs/${songId}`, { method: "DELETE" }),
