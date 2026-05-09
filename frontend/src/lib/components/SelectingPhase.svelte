@@ -14,6 +14,8 @@
   let submitting = $state<string | null>(null);
   let error = $state<string | null>(null);
   let starting = $state(false);
+  let highlightedIndex = $state(0);
+  let resultListEl: HTMLUListElement | null = $state(null);
 
   // Inline preview player for the picking phase. Plays Deezer's preview MP3
   // straight from cdnt-preview.dzcdn.net so no audio bytes go through our
@@ -56,6 +58,35 @@
   function onQueryInput() {
     if (searchTimer) clearTimeout(searchTimer);
     searchTimer = setTimeout(runSearch, 300);
+  }
+
+  $effect(() => {
+    results;
+    highlightedIndex = 0;
+  });
+
+  $effect(() => {
+    if (!resultListEl) return;
+    const el = resultListEl.children[highlightedIndex] as HTMLElement | undefined;
+    el?.scrollIntoView({ block: 'nearest' });
+  });
+
+  function onSearchKeyDown(e: KeyboardEvent) {
+    if (results.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      highlightedIndex = (highlightedIndex + 1) % results.length;
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      highlightedIndex = (highlightedIndex - 1 + results.length) % results.length;
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (submitting !== null) return;
+      const r = results[highlightedIndex];
+      if (!r) return;
+      if (mySongs.some((m) => m.spotify_track_id === r.spotify_track_id)) return;
+      submit(r);
+    }
   }
 
   async function runSearch() {
@@ -147,6 +178,7 @@
         placeholder="Search artist or title…"
         bind:value={query}
         oninput={onQueryInput}
+        onkeydown={onSearchKeyDown}
         disabled={mySongs.length >= quota}
       />
       {#if searching}
@@ -156,10 +188,12 @@
         <p class="mt-3 text-sm text-danger">{error}</p>
       {/if}
       {#if results.length > 0 && mySongs.length < quota}
-        <ul class="mt-4 space-y-2">
-          {#each results as r (r.spotify_track_id)}
+        <ul bind:this={resultListEl} class="mt-4 space-y-2">
+          {#each results as r, i (r.spotify_track_id)}
             <li
-              class="flex items-center gap-3 rounded-md border border-border bg-surface-raised p-3"
+              class="flex items-center gap-3 rounded-md border bg-surface-raised p-3"
+              class:border-accent={highlightedIndex === i}
+              class:border-border={highlightedIndex !== i}
             >
               <div class="relative h-12 w-12 flex-shrink-0 overflow-hidden rounded">
                 {#if r.album_image_url}
@@ -276,6 +310,7 @@
         songsPerPlayer={quota}
         showSubmissions
         highlightUserId={auth.user?.id ?? null}
+        roomId={roomData.id}
       />
     </div>
 

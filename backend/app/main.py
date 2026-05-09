@@ -32,7 +32,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(auth_router.router)
 app.include_router(auth_router.router_me)
 app.include_router(rooms_router.router)
 app.include_router(game_router.router)

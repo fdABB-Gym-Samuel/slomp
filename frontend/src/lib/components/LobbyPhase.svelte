@@ -2,6 +2,7 @@
   import { page } from '$app/stores';
   import { api, APIError } from '$lib/api';
   import { auth } from '$lib/auth.svelte';
+  import { confirmDialog } from '$lib/confirm.svelte';
   import type { Room } from '$lib/types';
   import PlayerList from './PlayerList.svelte';
   import SettingsPanel from './SettingsPanel.svelte';
@@ -68,9 +69,12 @@
 
   async function startSelecting() {
     if (settingsDirty) {
-      const proceed = confirm(
-        'You have unsaved settings changes. Start anyway? Your changes will be discarded.',
-      );
+      const proceed = await confirmDialog({
+        title: 'Discard unsaved settings?',
+        body: 'You have unsaved settings changes. Starting now will discard them.',
+        confirmLabel: 'Discard & start',
+        danger: true,
+      });
       if (!proceed) {
         activeTab = 'settings';
         return;
@@ -90,7 +94,12 @@
   }
 
   async function promote(userId: string, username: string) {
-    if (!confirm(`Make ${username} the leader?`)) return;
+    const ok = await confirmDialog({
+      title: `Make ${username} the leader?`,
+      body: 'They will take over control of the room.',
+      confirmLabel: 'Promote',
+    });
+    if (!ok) return;
     playerError = null;
     try {
       await api.promotePlayer(roomData.id, userId);
@@ -100,7 +109,13 @@
   }
 
   async function kick(userId: string, username: string) {
-    if (!confirm(`Kick ${username} from the room?`)) return;
+    const ok = await confirmDialog({
+      title: `Kick ${username}?`,
+      body: 'They will be removed from the room.',
+      confirmLabel: 'Kick',
+      danger: true,
+    });
+    if (!ok) return;
     playerError = null;
     try {
       await api.kickPlayer(roomData.id, userId);
@@ -163,6 +178,7 @@
           players={roomData.players}
           leaderId={roomData.leader_id}
           highlightUserId={auth.user?.id ?? null}
+          roomId={roomData.id}
           showLeaderActions={isLeader}
           onPromote={promote}
           onKick={kick}

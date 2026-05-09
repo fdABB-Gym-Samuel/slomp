@@ -2,24 +2,28 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
+import asyncpg
 from fastapi import Cookie, HTTPException, Response, status
 
 from . import db
 from .config import settings
 
 
-async def create_session(user_id: UUID) -> tuple[str, datetime]:
+async def create_session_in_conn(
+    conn: asyncpg.Connection, user_id: UUID
+) -> tuple[str, datetime]:
+    """Insert a session row on an open connection so the caller can keep it
+    inside a wider transaction (e.g. atomic user-create + session-create)."""
     token = secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(
         seconds=settings.session_ttl_seconds
     )
-    async with db.pool().acquire() as conn:
-        await conn.execute(
-            "INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, $3)",
-            token,
-            user_id,
-            expires_at,
-        )
+    await conn.execute(
+        "INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, $3)",
+        token,
+        user_id,
+        expires_at,
+    )
     return token, expires_at
 
 

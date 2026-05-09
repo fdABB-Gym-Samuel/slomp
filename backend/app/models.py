@@ -4,17 +4,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
-# ---------- auth ----------------------------------------------------------
-
-
-class RegisterRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=32)
-    password: str = Field(min_length=8, max_length=256)
-
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
+# ---------- identity ------------------------------------------------------
 
 
 class UserOut(BaseModel):
@@ -22,14 +12,21 @@ class UserOut(BaseModel):
     username: str
 
 
-class ChangeUsernameRequest(BaseModel):
+class CreateRoomRequest(BaseModel):
     username: str = Field(min_length=3, max_length=32)
-    current_password: str = Field(min_length=1, max_length=256)
 
 
-class ChangePasswordRequest(BaseModel):
-    current_password: str = Field(min_length=1, max_length=256)
-    new_password: str = Field(min_length=8, max_length=256)
+class JoinByCodeRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=8)
+    username: str = Field(min_length=3, max_length=32)
+
+
+class JoinRoomRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
+
+
+class RenameRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
 
 
 # ---------- rooms ---------------------------------------------------------
@@ -88,7 +85,7 @@ class RoomOut(BaseModel):
     code: str | None = None
     name: str | None = None
     is_public: bool = False
-    leader_id: UUID
+    leader_id: UUID | None = None
     status: RoomStatus
     settings: RoomSettings
     players: list[RoomPlayerOut]
@@ -104,10 +101,6 @@ class RoomInfoUpdate(BaseModel):
     is_public: bool | None = None
 
 
-class JoinByCodeRequest(BaseModel):
-    code: str = Field(min_length=1, max_length=8)
-
-
 class PublicRoomOut(BaseModel):
     id: UUID
     name: str | None
@@ -119,12 +112,6 @@ class PublicRoomOut(BaseModel):
     status: RoomStatus = "lobby"
     joins_as_spectator: bool = False
     game_mode: GameMode = "classic"
-
-
-class MyRoomOut(BaseModel):
-    id: UUID
-    name: str | None
-    status: RoomStatus
 
 
 # ---------- songs ---------------------------------------------------------

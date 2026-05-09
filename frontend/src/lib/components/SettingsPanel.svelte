@@ -19,7 +19,15 @@
   let saving = $state(false);
   let error = $state<string | null>(null);
 
+  // Sync local from `roomData.settings` only when the server-side values
+  // actually change. Without this, an unrelated room refetch (e.g. on
+  // `player_left`, which produces a new `room` object with structurally
+  // identical settings) would clobber the leader's unsaved edits.
+  let lastServerSnapshot = '';
   $effect(() => {
+    const snap = JSON.stringify(roomData.settings);
+    if (snap === lastServerSnapshot) return;
+    lastServerSnapshot = snap;
     local = { ...roomData.settings };
     bracketsText = roomData.settings.guess_brackets_seconds.join(', ');
     blursText = (

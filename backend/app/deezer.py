@@ -22,6 +22,8 @@ from typing import Any
 
 import httpx
 
+from app.matching import normalize_artist, normalize_title
+
 logger = logging.getLogger("slomp.music")
 
 _API = "https://api.deezer.com"
@@ -134,12 +136,20 @@ _RANDOM_GENRE_IDS = (0, 132, 116, 152, 113, 165, 84, 173)
 
 async def fetch_random_tracks(min_popularity: int, count: int) -> list[dict]:
     """Pull a pool of popular tracks from Deezer charts (multiple genres),
-    drop anything without a preview or below `min_popularity`, then return
-    a random sample of size `count`. May return fewer than `count` if the
-    filter is too tight to fill the request."""
+    then for each candidate find the version that `/search` surfaces and
+    keep only ones whose search-discoverable rank passes `min_popularity`.
+
+    Deezer often has several track IDs for the same recording with
+    different ranks (e.g. an album release vs a deluxe-edition release).
+    The chart endpoint exposes IDs that don't always appear in search
+    results, so without this re-search a random pick can be a song
+    classic-mode players cannot submit themselves — an inconsistency a
+    guesser hits when their search box doesn't return the song they're
+    hearing. Returning the search version also makes the stored
+    `popularity` match what players see."""
     rules = {"min_popularity": min_popularity, "required_artists": []}
 
-    async def _one(gid: int) -> list[dict]:
+    async def _chart(gid: int) -> list[dict]:
         try:
             data = await _api_get(f"/chart/{gid}/tracks", {"limit": 100})
             return data.get("data", [])
@@ -147,20 +157,62 @@ async def fetch_random_tracks(min_popularity: int, count: int) -> list[dict]:
             logger.warning("chart fetch failed for genre=%s", gid)
             return []
 
-    batches = await asyncio.gather(*(_one(g) for g in _RANDOM_GENRE_IDS))
-    pool: dict[Any, dict] = {}
+    batches = await asyncio.gather(*(_chart(g) for g in _RANDOM_GENRE_IDS))
+    seen_chart: set = set()
+    candidates: list[dict] = []
     for batch in batches:
         for t in batch:
             tid = t.get("id")
-            if tid is None or tid in pool:
+            if tid is None or tid in seen_chart:
                 continue
-            ok, _ = matches_rules(t, rules)
-            if ok:
-                pool[tid] = t
+            seen_chart.add(tid)
+            if not t.get("preview"):
+                continue
+            candidates.append(t)
+    random.shuffle(candidates)
 
-    tracks = list(pool.values())
-    random.shuffle(tracks)
-    return tracks[:count]
+    async def _resolve(t: dict) -> dict | None:
+        title = t.get("title") or ""
+        artist_name = (t.get("artist") or {}).get("name") or ""
+        if not title or not artist_name:
+            return None
+        norm_title = normalize_title(title)
+        norm_artist = normalize_artist(artist_name)
+        try:
+            results = await search_tracks(f"{title} {artist_name}".strip(), limit=5)
+        except Exception:
+            return None
+        for r in results:
+            if normalize_title(r.get("title") or "") != norm_title:
+                continue
+            r_artist = (r.get("artist") or {}).get("name") or ""
+            if normalize_artist(r_artist) != norm_artist:
+                continue
+            ok, _ = matches_rules(r, rules)
+            if ok:
+                return r
+        return None
+
+    accepted: list[dict] = []
+    seen_accepted: set = set()
+    chunk = 25
+    for i in range(0, len(candidates), chunk):
+        if len(accepted) >= count:
+            break
+        resolved = await asyncio.gather(
+            *(_resolve(t) for t in candidates[i : i + chunk])
+        )
+        for r in resolved:
+            if r is None:
+                continue
+            tid = r.get("id")
+            if tid is None or tid in seen_accepted:
+                continue
+            seen_accepted.add(tid)
+            accepted.append(r)
+            if len(accepted) >= count:
+                break
+    return accepted[:count]
 
 
 async def get_artist(artist_id: str) -> dict:

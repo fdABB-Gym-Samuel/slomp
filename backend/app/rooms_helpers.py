@@ -95,12 +95,15 @@ def room_key(room: asyncpg.Record | UUID) -> str:
 async def remove_player_from_room(
     conn: asyncpg.Connection, room: asyncpg.Record, user_id: UUID
 ) -> tuple[bool, UUID | None]:
-    """Delete the user's row from room_players and hand off leadership if
-    needed. Must be called inside a transaction. Returns
+    """Drop the user from the room (membership + ephemeral identity) and
+    hand off leadership if needed. Must run inside a transaction. Returns
     (room_now_empty, new_leader_id). The caller is responsible for kicking
     off `schedule_empty_room_cleanup` when room_now_empty is True — the
     actual room delete is deferred so a player who immediately rejoins
-    (or someone who joins via code/link) can save it."""
+    (or someone who joins via code/link) can save it.
+
+    Order matters: leader-transfer (or letting `rooms.leader_id` go NULL via
+    the SET NULL FK) must happen before the user delete."""
     await conn.execute(
         "DELETE FROM room_players WHERE room_id = $1 AND user_id = $2",
         room["id"],
@@ -110,7 +113,11 @@ async def remove_player_from_room(
         "SELECT count(*) FROM room_players WHERE room_id = $1",
         room["id"],
     )
+    new_leader: UUID | None = None
     if remaining == 0:
+        # Drop the orphaned user. The SET NULL FK on rooms.leader_id keeps
+        # the empty room alive for its cleanup-grace window.
+        await conn.execute("DELETE FROM users WHERE id = $1", user_id)
         return True, None
     if room["leader_id"] == user_id:
         new_leader = await conn.fetchval(
@@ -123,8 +130,8 @@ async def remove_player_from_room(
             new_leader,
             room["id"],
         )
-        return False, new_leader
-    return False, None
+    await conn.execute("DELETE FROM users WHERE id = $1", user_id)
+    return False, new_leader
 
 
 async def _cleanup_empty_room(room_id: UUID) -> None:

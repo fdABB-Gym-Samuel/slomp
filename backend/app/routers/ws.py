@@ -320,13 +320,7 @@ async def room_ws(websocket: WebSocket, room_id: UUID) -> None:
 @router.websocket("/lobby/ws")
 async def lobby_ws(websocket: WebSocket) -> None:
     """Live feed of public-room changes for clients on the home page.
-    Anonymous of room context — every connected viewer gets every event."""
-    token = websocket.cookies.get("session")
-    user_id = await auth.lookup_user_id_for_ws(token)
-    if user_id is None:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
-
+    Open to anonymous visitors — the home page is public."""
     await websocket.accept()
     await state.lobby_hub.add(websocket)
     try:
@@ -341,6 +335,6 @@ async def lobby_ws(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     except Exception:
-        logger.exception("lobby ws handler crashed for user=%s", user_id)
+        logger.exception("lobby ws handler crashed")
     finally:
         await state.lobby_hub.remove(websocket)

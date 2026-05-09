@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { api, APIError } from '$lib/api';
   import type { RoomPlayer } from '$lib/types';
 
   let {
@@ -7,15 +8,17 @@
     songsPerPlayer,
     showSubmissions = false,
     highlightUserId = null,
+    roomId = null,
     showLeaderActions = false,
     onPromote,
     onKick,
   }: {
     players: RoomPlayer[];
-    leaderId: string;
+    leaderId: string | null;
     songsPerPlayer?: number;
     showSubmissions?: boolean;
     highlightUserId?: string | null;
+    roomId?: string | null;
     showLeaderActions?: boolean;
     onPromote?: (userId: string, username: string) => void;
     onKick?: (userId: string, username: string) => void;
@@ -35,6 +38,42 @@
   function secondsUntil(deadline: number): number {
     return Math.max(0, Math.ceil(deadline - now));
   }
+
+  let editing = $state(false);
+  let draftName = $state('');
+  let renameError = $state<string | null>(null);
+  let renameSubmitting = $state(false);
+
+  function startEdit(currentName: string) {
+    draftName = currentName;
+    renameError = null;
+    editing = true;
+  }
+
+  function cancelEdit() {
+    editing = false;
+    renameError = null;
+  }
+
+  async function submitRename(e: Event) {
+    e.preventDefault();
+    if (!roomId) return;
+    const name = draftName.trim();
+    if (name.length < 3 || name.length > 32) {
+      renameError = '3–32 characters';
+      return;
+    }
+    renameSubmitting = true;
+    renameError = null;
+    try {
+      await api.renameInRoom(roomId, name);
+      editing = false;
+    } catch (err) {
+      renameError = err instanceof APIError ? err.message : String(err);
+    } finally {
+      renameSubmitting = false;
+    }
+  }
 </script>
 
 <ul class="divide-y divide-border">
@@ -45,12 +84,59 @@
           class="h-2 w-2 rounded-full {p.connected ? 'bg-success' : 'bg-text-muted'}"
           title={p.connected ? 'connected' : 'disconnected'}
         ></span>
-        <span
-          class="font-medium"
-          class:text-secondary={p.user.id === highlightUserId}
-        >
-          {p.user.username}
-        </span>
+        {#if p.user.id === highlightUserId && editing && roomId}
+          <form onsubmit={submitRename} class="flex items-center gap-2">
+            <!-- svelte-ignore a11y_autofocus -->
+            <input
+              class="input h-7 px-2 py-0 text-sm"
+              bind:value={draftName}
+              minlength="3"
+              maxlength="32"
+              autocomplete="off"
+              autofocus
+              onkeydown={(e) => {
+                if (e.key === 'Escape') cancelEdit();
+              }}
+            />
+            <button
+              type="submit"
+              class="btn-ghost px-2 py-0 text-xs"
+              disabled={renameSubmitting || !draftName.trim()}
+              title="Save"
+            >
+              Save
+            </button>
+            <button
+              type="button"
+              class="btn-ghost px-2 py-0 text-xs"
+              onclick={cancelEdit}
+              disabled={renameSubmitting}
+              title="Cancel"
+            >
+              Cancel
+            </button>
+            {#if renameError}
+              <span class="text-xs text-danger">{renameError}</span>
+            {/if}
+          </form>
+        {:else}
+          <span
+            class="font-medium"
+            class:text-secondary={p.user.id === highlightUserId}
+          >
+            {p.user.username}
+          </span>
+          {#if p.user.id === highlightUserId && roomId}
+            <button
+              type="button"
+              class="btn-ghost px-1 py-0 text-xs"
+              title="Change name"
+              onclick={() => startEdit(p.user.username)}
+            >
+              edit
+            </button>
+          {/if}
+        {/if}
         {#if p.user.id === leaderId}
           <span class="badge bg-accent/20 text-accent">leader</span>
         {/if}

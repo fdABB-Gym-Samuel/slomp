@@ -2,19 +2,22 @@ import json
 from uuid import UUID
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
 
 from .. import auth, db, deezer, game, state
 from ..models import (
+    CreateRoomRequest,
     JoinByCodeRequest,
-    MyRoomOut,
+    JoinRoomRequest,
     PhaseRequest,
     PublicRoomOut,
+    RenameRequest,
     RoomInfoUpdate,
     RoomOut,
     RoomSettings,
     SubmitSongRequest,
     SubmittedSongOut,
+    UserOut,
 )
 from ..matching import normalize_title
 from ..rooms_helpers import (
@@ -68,11 +71,78 @@ async def _generate_unique_code(conn: asyncpg.Connection) -> str:
     )
 
 
+async def _wipe_existing_identity(
+    conn: asyncpg.Connection, incoming_session: str | None
+) -> list[tuple[str, bool, UUID | None, UUID]]:
+    """If the request carries a session cookie pointing to a live user,
+    drop them from any room they're in (which also reaps the user row via
+    `remove_player_from_room`). Returns the leave_results to broadcast
+    post-commit. A no-op for fresh visitors and dead-cookie cases."""
+    if not incoming_session:
+        return []
+    old_user_id = await auth.lookup_user_id(incoming_session)
+    if old_user_id is None:
+        return []
+    return await leave_other_rooms(conn, old_user_id, None)
+
+
+async def _establish_identity(
+    conn: asyncpg.Connection,
+    response: Response,
+    username: str,
+) -> UUID:
+    """Create a fresh user row + session and stamp the cookie. Caller is
+    responsible for `_wipe_existing_identity` first if there's an incoming
+    cookie. Must run inside a transaction."""
+    user_id = await conn.fetchval(
+        "INSERT INTO users (username) VALUES ($1) RETURNING id",
+        username,
+    )
+    token, expires_at = await auth.create_session_in_conn(conn, user_id)
+    auth.set_session_cookie(response, token, expires_at)
+    return user_id
+
+
+async def _assert_name_free_in_room(
+    conn: asyncpg.Connection,
+    room_id: UUID,
+    username: str,
+    except_user_id: UUID | None = None,
+) -> None:
+    """Per-room username uniqueness — case-insensitive (users.username is
+    CITEXT). Raises 409 on conflict."""
+    if except_user_id is None:
+        taken = await conn.fetchval(
+            "SELECT 1 FROM room_players rp JOIN users u ON u.id = rp.user_id "
+            "WHERE rp.room_id = $1 AND u.username = $2",
+            room_id,
+            username,
+        )
+    else:
+        taken = await conn.fetchval(
+            "SELECT 1 FROM room_players rp JOIN users u ON u.id = rp.user_id "
+            "WHERE rp.room_id = $1 AND u.username = $2 AND rp.user_id <> $3",
+            room_id,
+            username,
+            except_user_id,
+        )
+    if taken:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"code": "name_taken", "message": "name already taken in this room"},
+        )
+
+
 @router.post("", status_code=201, response_model=RoomOut)
-async def create_room(user_id: UUID = Depends(auth.get_current_user_id)) -> RoomOut:
+async def create_room(
+    req: CreateRoomRequest,
+    response: Response,
+    session: str | None = Cookie(default=None, alias="session"),
+) -> RoomOut:
     async with db.pool().acquire() as conn:
         async with conn.transaction():
-            leave_results = await leave_other_rooms(conn, user_id, None)
+            leave_results = await _wipe_existing_identity(conn, session)
+            user_id = await _establish_identity(conn, response, req.username)
             code = await _generate_unique_code(conn)
             room_id = await conn.fetchval(
                 "INSERT INTO rooms (code, leader_id) VALUES ($1, $2) RETURNING id",
@@ -90,28 +160,8 @@ async def create_room(user_id: UUID = Depends(auth.get_current_user_id)) -> Room
     return out
 
 
-@router.get("/mine", response_model=list[MyRoomOut])
-async def list_my_rooms(
-    user_id: UUID = Depends(auth.get_current_user_id),
-) -> list[MyRoomOut]:
-    async with db.pool().acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT r.id, r.name, r.status
-            FROM rooms r
-            JOIN room_players rp ON rp.room_id = r.id
-            WHERE rp.user_id = $1
-            ORDER BY rp.joined_at DESC
-            """,
-            user_id,
-        )
-    return [MyRoomOut(id=r["id"], name=r["name"], status=r["status"]) for r in rows]
-
-
 @router.get("/public", response_model=list[PublicRoomOut])
-async def list_public_rooms(
-    user_id: UUID = Depends(auth.get_current_user_id),
-) -> list[PublicRoomOut]:
+async def list_public_rooms() -> list[PublicRoomOut]:
     payloads = await list_public_rooms_payloads()
     return [PublicRoomOut.model_validate(p) for p in payloads]
 
@@ -119,26 +169,24 @@ async def list_public_rooms(
 @router.post("/join-by-code", response_model=RoomOut)
 async def join_by_code(
     req: JoinByCodeRequest,
-    user_id: UUID = Depends(auth.get_current_user_id),
+    response: Response,
+    session: str | None = Cookie(default=None, alias="session"),
 ) -> RoomOut:
     code = req.code.strip().upper()
     async with db.pool().acquire() as conn:
         async with conn.transaction():
             room = await load_room_by_code_or_404(conn, code)
-            is_member = await conn.fetchval(
-                "SELECT 1 FROM room_players WHERE room_id = $1 AND user_id = $2",
-                room["id"],
-                user_id,
-            )
-            spectating = False if is_member else _spectator_on_join(room)
-            leave_results = await leave_other_rooms(conn, user_id, room["id"])
+            await _assert_name_free_in_room(conn, room["id"], req.username)
+            leave_results = await _wipe_existing_identity(conn, session)
+            user_id = await _establish_identity(conn, response, req.username)
+            spectating = _spectator_on_join(room)
             # Late joiners with `lock_after_lobby` off slot into the next
             # round naturally. With it on, they're flagged `spectating` so
             # `_start_next_round` skips them until the room returns to the
             # lobby.
             await conn.execute(
                 "INSERT INTO room_players (room_id, user_id, spectating) "
-                "VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                "VALUES ($1, $2, $3)",
                 room["id"],
                 user_id,
                 spectating,
@@ -223,22 +271,18 @@ async def update_room_info(
 
 @router.post("/{room_id}/join", response_model=RoomOut)
 async def join_room(
-    room_id: UUID, user_id: UUID = Depends(auth.get_current_user_id)
+    room_id: UUID,
+    req: JoinRoomRequest,
+    response: Response,
+    session: str | None = Cookie(default=None, alias="session"),
 ) -> RoomOut:
     async with db.pool().acquire() as conn:
         async with conn.transaction():
             room = await load_room_or_404(conn, room_id)
             # Joining by id (e.g. clicking through from the public list) is
             # only allowed on public rooms; private rooms must be joined with
-            # their code via /rooms/join-by-code. Late joiners (room past
-            # lobby phase) are allowed: they start with score 0, sit out the
-            # in-flight round, and join the next round naturally.
-            is_member = await conn.fetchval(
-                "SELECT 1 FROM room_players WHERE room_id = $1 AND user_id = $2",
-                room["id"],
-                user_id,
-            )
-            if not is_member and not room["is_public"]:
+            # their code via /rooms/join-by-code.
+            if not room["is_public"]:
                 raise HTTPException(
                     status.HTTP_403_FORBIDDEN,
                     detail={
@@ -246,11 +290,15 @@ async def join_room(
                         "message": "this room is private; join with its code",
                     },
                 )
-            spectating = False if is_member else _spectator_on_join(room)
-            leave_results = await leave_other_rooms(conn, user_id, room["id"])
+            await _assert_name_free_in_room(conn, room["id"], req.username)
+            leave_results = await _wipe_existing_identity(conn, session)
+            user_id = await _establish_identity(conn, response, req.username)
+            # Late joiners (room past lobby phase) start with score 0, sit
+            # out the in-flight round, and join the next round naturally.
+            spectating = _spectator_on_join(room)
             await conn.execute(
                 "INSERT INTO room_players (room_id, user_id, spectating) "
-                "VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                "VALUES ($1, $2, $3)",
                 room["id"],
                 user_id,
                 spectating,
@@ -272,7 +320,8 @@ async def join_room(
 
 @router.post("/{room_id}/leave", status_code=204)
 async def leave_room(
-    room_id: UUID, user_id: UUID = Depends(auth.get_current_user_id)
+    room_id: UUID,
+    user_id: UUID = Depends(auth.get_current_user_id),
 ) -> Response:
     key = room_key(room_id)
     async with db.pool().acquire() as conn:
@@ -280,10 +329,16 @@ async def leave_room(
             room = await load_room_or_404(conn, room_id)
             now_empty, new_leader = await remove_player_from_room(conn, room, user_id)
 
+    # The user row was cascade-deleted inside remove_player_from_room, so
+    # the session is gone too. Clear the cookie so the browser stops
+    # advertising a dead token.
+    out = Response(status_code=204)
+    auth.clear_session_cookie(out)
+
     if now_empty:
         schedule_empty_room_cleanup(room_id)
         await broadcast_public_room_change(room_id)
-        return Response(status_code=204)
+        return out
     await state.hub.broadcast(
         key,
         {"type": "player_left", "payload": {"user_id": str(user_id)}},
@@ -294,7 +349,51 @@ async def leave_room(
             {"type": "leader_changed", "payload": {"leader_id": str(new_leader)}},
         )
     await broadcast_public_room_change(room_id)
-    return Response(status_code=204)
+    return out
+
+
+@router.patch("/{room_id}/me/username", response_model=UserOut)
+async def rename_in_room(
+    room_id: UUID,
+    req: RenameRequest,
+    user_id: UUID = Depends(auth.get_current_user_id),
+) -> UserOut:
+    async with db.pool().acquire() as conn:
+        async with conn.transaction():
+            is_member = await conn.fetchval(
+                "SELECT 1 FROM room_players WHERE room_id = $1 AND user_id = $2",
+                room_id,
+                user_id,
+            )
+            if not is_member:
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN,
+                    detail={
+                        "code": "not_in_room",
+                        "message": "you are not in this room",
+                    },
+                )
+            await _assert_name_free_in_room(
+                conn, room_id, req.username, except_user_id=user_id
+            )
+            row = await conn.fetchrow(
+                "UPDATE users SET username = $1 WHERE id = $2 RETURNING id, username",
+                req.username,
+                user_id,
+            )
+
+    out = UserOut(id=row["id"], username=row["username"])
+    await state.hub.broadcast(
+        room_key(room_id),
+        {
+            "type": "player_renamed",
+            "payload": {"user_id": str(user_id), "username": out.username},
+        },
+    )
+    # Public-rooms list shows the leader's username, so refresh it on a
+    # leader rename. Cheap to fire unconditionally.
+    await broadcast_public_room_change(room_id)
+    return out
 
 
 @router.patch("/{room_id}/settings", response_model=RoomOut)
@@ -632,12 +731,12 @@ async def kick_player(
                         "message": "use leave instead of kicking yourself",
                     },
                 )
-            deleted = await conn.execute(
-                "DELETE FROM room_players WHERE room_id = $1 AND user_id = $2",
+            is_member = await conn.fetchval(
+                "SELECT 1 FROM room_players WHERE room_id = $1 AND user_id = $2",
                 room["id"],
                 target_user_id,
             )
-            if deleted == "DELETE 0":
+            if not is_member:
                 raise HTTPException(
                     status.HTTP_404_NOT_FOUND,
                     detail={
@@ -645,11 +744,21 @@ async def kick_player(
                         "message": "target user is not in this room",
                     },
                 )
+            now_empty, new_leader = await remove_player_from_room(
+                conn, room, target_user_id
+            )
 
     await state.hub.broadcast(
         room_key(room),
         {"type": "player_kicked", "payload": {"user_id": str(target_user_id)}},
     )
+    if new_leader is not None:
+        await state.hub.broadcast(
+            room_key(room),
+            {"type": "leader_changed", "payload": {"leader_id": str(new_leader)}},
+        )
+    if now_empty:
+        schedule_empty_room_cleanup(room["id"])
     await broadcast_public_room_change(room["id"])
     return Response(status_code=204)
 

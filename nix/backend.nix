@@ -19,7 +19,6 @@ let
       mutagen
       pydub
       pillow
-      argon2-cffi
       asyncpg
     ]
   );

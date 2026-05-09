@@ -171,6 +171,18 @@ class RoomConnection {
         if (this.room) this.room.leader_id = ev.payload.leader_id;
         break;
 
+      case "player_renamed":
+        if (this.room) {
+          const p = this.room.players.find(
+            (x) => x.user.id === ev.payload.user_id,
+          );
+          if (p) p.user.username = ev.payload.username;
+        }
+        if (auth.user && ev.payload.user_id === auth.user.id) {
+          auth.setUser({ ...auth.user, username: ev.payload.username });
+        }
+        break;
+
       case "settings_updated":
         if (this.room) this.room.settings = ev.payload.settings;
         break;

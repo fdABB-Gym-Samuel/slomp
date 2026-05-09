@@ -1,15 +1,24 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { api } from '$lib/api';
+  import { auth } from '$lib/auth.svelte';
+  import { confirmDialog } from '$lib/confirm.svelte';
   import type { Room } from '$lib/types';
 
   let { roomData }: { roomData: Room } = $props();
 
   async function leave() {
-    if (!confirm('Leave this room?')) return;
+    const ok = await confirmDialog({
+      title: 'Leave this room?',
+      body: 'You will lose your name and score for this room.',
+      confirmLabel: 'Leave',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await api.leaveRoom(roomData.id);
     } catch {}
+    auth.clear();
     goto('/');
   }
 

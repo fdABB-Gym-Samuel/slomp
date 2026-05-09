@@ -16,6 +16,8 @@
   let results = $state<ArtistSummary[]>([]);
   let searching = $state(false);
   let error = $state<string | null>(null);
+  let highlightedIndex = $state(0);
+  let resultListEl: HTMLUListElement | null = $state(null);
 
   // Cache id → ArtistSummary so we can render chips for selected ids.
   let cache = $state<Record<string, ArtistSummary>>({});
@@ -45,6 +47,32 @@
   function onInput() {
     if (timer) clearTimeout(timer);
     timer = setTimeout(runSearch, 300);
+  }
+
+  $effect(() => {
+    results;
+    highlightedIndex = 0;
+  });
+
+  $effect(() => {
+    if (!resultListEl) return;
+    const el = resultListEl.children[highlightedIndex] as HTMLElement | undefined;
+    el?.scrollIntoView({ block: 'nearest' });
+  });
+
+  function onSearchKeyDown(e: KeyboardEvent) {
+    if (results.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      highlightedIndex = (highlightedIndex + 1) % results.length;
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      highlightedIndex = (highlightedIndex - 1 + results.length) % results.length;
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const a = results[highlightedIndex];
+      if (a) add(a);
+    }
   }
 
   async function runSearch() {
@@ -118,6 +146,7 @@
     placeholder="search Spotify for an artist…"
     bind:value={query}
     oninput={onInput}
+    onkeydown={onSearchKeyDown}
   />
 
   {#if searching}
@@ -130,13 +159,15 @@
 
   {#if results.length > 0}
     <ul
+      bind:this={resultListEl}
       class="mt-2 max-h-48 overflow-y-auto rounded-md border border-border bg-surface-raised"
     >
-      {#each results as a (a.id)}
+      {#each results as a, i (a.id)}
         <li>
           <button
             type="button"
             class="flex w-full items-center gap-3 p-2 text-left hover:bg-surface"
+            class:bg-surface={highlightedIndex === i}
             disabled={selected.includes(a.id)}
             onclick={() => add(a)}
           >

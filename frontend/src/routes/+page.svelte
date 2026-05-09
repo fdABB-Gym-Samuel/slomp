@@ -3,28 +3,26 @@
   import { goto } from '$app/navigation';
   import { api, APIError } from '$lib/api';
   import { auth } from '$lib/auth.svelte';
-  import type { MyRoom, PublicRoom, RoomStatus } from '$lib/types';
+  import type { PublicRoom, RoomStatus } from '$lib/types';
+
+  type ModalAction =
+    | { kind: 'create' }
+    | { kind: 'join_code'; code: string }
+    | { kind: 'join_public'; id: string };
+
+  const USERNAME_KEY = 'slomp:lastUsername';
 
   let joinCode = $state('');
-  let creating = $state(false);
-  let joining = $state(false);
   let error = $state<string | null>(null);
 
   let publicRooms = $state<PublicRoom[] | null>(null);
   let publicError = $state<string | null>(null);
   let publicLoading = $state(false);
-  let joiningId = $state<string | null>(null);
 
-  let myRooms = $state<MyRoom[]>([]);
-  let myRoomsError = $state<string | null>(null);
-  let leavingId = $state<string | null>(null);
-
-  const STATUS_LABEL: Record<MyRoom['status'], string> = {
-    lobby: 'in the lobby',
-    selecting: 'picking songs',
-    playing: 'playing now',
-    results: 'showing results',
-  };
+  let modal = $state<ModalAction | null>(null);
+  let modalUsername = $state('');
+  let modalSubmitting = $state(false);
+  let modalError = $state<string | null>(null);
 
   const STAGE_BADGE: Record<RoomStatus, { label: string; cls: string }> = {
     lobby: { label: 'lobby', cls: 'bg-success/20 text-success' },
@@ -48,33 +46,60 @@
     return Math.max(0, Math.ceil(at - now));
   }
 
-  async function createRoom() {
-    creating = true;
-    error = null;
+  function openModal(action: ModalAction) {
+    modal = action;
+    modalUsername = localStorage.getItem(USERNAME_KEY) ?? '';
+    modalError = null;
+  }
+
+  function closeModal() {
+    modal = null;
+    modalSubmitting = false;
+    modalError = null;
+  }
+
+  async function submitModal(e: Event) {
+    e.preventDefault();
+    if (modal === null) return;
+    const name = modalUsername.trim();
+    if (name.length < 3 || name.length > 32) {
+      modalError = 'name must be 3–32 characters';
+      return;
+    }
+    modalSubmitting = true;
+    modalError = null;
     try {
-      const room = await api.createRoom();
+      let room;
+      if (modal.kind === 'create') {
+        room = await api.createRoom(name);
+      } else if (modal.kind === 'join_code') {
+        room = await api.joinByCode(modal.code, name);
+      } else {
+        room = await api.joinRoom(modal.id, name);
+      }
+      localStorage.setItem(USERNAME_KEY, name);
+      // refresh /me so the auth store has the canonical id+username
+      await auth.refresh();
       goto(`/room/${room.id}`);
-    } catch (e) {
-      error = e instanceof APIError ? e.message : String(e);
-    } finally {
-      creating = false;
+    } catch (err) {
+      modalError = err instanceof APIError ? err.message : String(err);
+      modalSubmitting = false;
     }
   }
 
-  async function joinRoom(e: Event) {
+  function startCreate() {
+    openModal({ kind: 'create' });
+  }
+
+  function startJoinByCode(e: Event) {
     e.preventDefault();
-    if (!joinCode.trim()) return;
-    joining = true;
-    error = null;
     const code = joinCode.trim().toUpperCase();
-    try {
-      const room = await api.joinByCode(code);
-      goto(`/room/${room.id}`);
-    } catch (err) {
-      error = err instanceof APIError ? err.message : String(err);
-    } finally {
-      joining = false;
-    }
+    if (!code) return;
+    openModal({ kind: 'join_code', code });
+  }
+
+  function startJoinPublic(id: string) {
+    openModal({ kind: 'join_public', id });
   }
 
   // Live updates over WS. The /lobby/ws endpoint sends an initial snapshot
@@ -155,7 +180,6 @@
   }
 
   async function loadPublicRooms() {
-    if (!auth.user) return;
     publicLoading = true;
     publicError = null;
     try {
@@ -167,44 +191,17 @@
     }
   }
 
-  async function joinPublic(id: string) {
-    joiningId = id;
-    publicError = null;
-    try {
-      await api.joinRoom(id);
-      goto(`/room/${id}`);
-    } catch (e) {
-      publicError = e instanceof APIError ? e.message : String(e);
-      joiningId = null;
-    }
-  }
-
-  async function loadMyRooms() {
-    if (!auth.user) return;
-    myRoomsError = null;
-    try {
-      myRooms = await api.listMyRooms();
-    } catch (e) {
-      myRoomsError = e instanceof APIError ? e.message : String(e);
-    }
-  }
-
-  async function leaveExisting(id: string) {
-    leavingId = id;
-    myRoomsError = null;
-    try {
-      await api.leaveRoom(id);
-      myRooms = myRooms.filter((r) => r.id !== id);
-    } catch (e) {
-      myRoomsError = e instanceof APIError ? e.message : String(e);
-    } finally {
-      leavingId = null;
-    }
-  }
-
   onMount(() => {
-    loadMyRooms();
-    if (auth.user) openLobbyWs();
+    openLobbyWs();
+    // Share-link forwarding: /?code=ABC123 (set by the room page when an
+    // anon visitor follows a share link) auto-opens the join modal.
+    const url = new URL(location.href);
+    const sharedCode = url.searchParams.get('code');
+    if (sharedCode) {
+      openModal({ kind: 'join_code', code: sharedCode.toUpperCase() });
+      url.searchParams.delete('code');
+      history.replaceState(history.state, '', url.toString());
+    }
   });
 
   onDestroy(closeLobbyWs);
@@ -215,54 +212,14 @@
     <h1 class="text-4xl font-bold tracking-tight text-accent">slomp</h1>
   </header>
 
-  {#if myRooms.length > 0}
-    <section class="mb-8 space-y-3">
-      {#each myRooms as r (r.id)}
-        <div class="card flex flex-wrap items-center justify-between gap-3 border-accent/40">
-          <div class="min-w-0 flex-1">
-            <p class="text-sm text-text-muted">You're already in a room</p>
-            <p class="truncate font-medium text-text-primary">
-              {r.name ?? 'Untitled room'}
-              <span class="ml-1 text-xs text-text-muted">— {STATUS_LABEL[r.status]}</span>
-            </p>
-          </div>
-          <div class="flex gap-2">
-            <button
-              type="button"
-              class="btn-primary text-sm"
-              onclick={() => goto(`/room/${r.id}`)}
-            >
-              Go to room
-            </button>
-            <button
-              type="button"
-              class="btn-ghost text-sm"
-              disabled={leavingId === r.id}
-              onclick={() => leaveExisting(r.id)}
-            >
-              {leavingId === r.id ? 'Leaving…' : 'Leave'}
-            </button>
-          </div>
-        </div>
-      {/each}
-      {#if myRoomsError}
-        <p class="text-sm text-danger">{myRoomsError}</p>
-      {/if}
-    </section>
-  {/if}
-
   <div class="grid gap-6 md:grid-cols-2">
     <div class="card">
       <h2 class="text-xl font-semibold">Create a room</h2>
       <p class="mt-1 mb-6 text-sm text-text-secondary">
         Start a new game and invite friends with the room code.
       </p>
-      <button
-        class="btn-primary w-full"
-        onclick={createRoom}
-        disabled={creating}
-      >
-        {creating ? 'Creating…' : 'Create room'}
+      <button class="btn-primary w-full" onclick={startCreate}>
+        Create room
       </button>
     </div>
 
@@ -271,15 +228,15 @@
       <p class="mt-1 mb-6 text-sm text-text-secondary">
         Got a code from a friend? Drop it in below.
       </p>
-      <form class="space-y-3" onsubmit={joinRoom}>
+      <form class="space-y-3" onsubmit={startJoinByCode}>
         <input
           class="input uppercase tracking-widest"
           placeholder="ABC123"
           bind:value={joinCode}
           maxlength="8"
         />
-        <button class="btn-secondary w-full" disabled={joining || !joinCode.trim()}>
-          {joining ? 'Joining…' : 'Join'}
+        <button class="btn-secondary w-full" disabled={!joinCode.trim()}>
+          Join
         </button>
       </form>
     </div>
@@ -357,14 +314,9 @@
             <button
               type="button"
               class="btn-secondary text-sm"
-              disabled={joiningId !== null}
-              onclick={() => joinPublic(room.id)}
+              onclick={() => startJoinPublic(room.id)}
             >
-              {joiningId === room.id
-                ? 'Joining…'
-                : room.joins_as_spectator
-                  ? 'Spectate'
-                  : 'Join'}
+              {room.joins_as_spectator ? 'Spectate' : 'Join'}
             </button>
           </li>
         {/each}
@@ -372,3 +324,49 @@
     {/if}
   </section>
 </div>
+
+{#if modal !== null}
+  <div
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+    role="dialog"
+    aria-modal="true"
+  >
+    <div class="card w-full max-w-sm">
+      <h2 class="mb-2 text-lg font-semibold">Pick a name</h2>
+      <p class="mb-4 text-sm text-text-secondary">
+        This is how other players will see you in the room.
+      </p>
+      <form onsubmit={submitModal} class="space-y-3">
+        <!-- svelte-ignore a11y_autofocus -->
+        <input
+          class="input"
+          bind:value={modalUsername}
+          placeholder="your name"
+          minlength="3"
+          maxlength="32"
+          autocomplete="off"
+          autofocus
+        />
+        {#if modalError}
+          <p class="text-sm text-danger">{modalError}</p>
+        {/if}
+        <div class="flex justify-end gap-2">
+          <button
+            type="button"
+            class="btn-ghost"
+            onclick={closeModal}
+            disabled={modalSubmitting}
+          >
+            Cancel
+          </button>
+          <button
+            class="btn-primary"
+            disabled={modalSubmitting || !modalUsername.trim()}
+          >
+            {modalSubmitting ? 'Joining…' : 'Continue'}
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}

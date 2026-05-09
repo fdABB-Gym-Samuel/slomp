@@ -19,31 +19,12 @@ class AuthStore {
     }
   }
 
-  async login(username: string, password: string): Promise<void> {
-    this.user = await api.login(username, password);
+  setUser(user: User | null): void {
+    this.user = user;
   }
 
-  async register(username: string, password: string): Promise<void> {
-    this.user = await api.register(username, password);
-  }
-
-  async logout(): Promise<void> {
-    await api.logout();
+  clear(): void {
     this.user = null;
-  }
-
-  async changeUsername(
-    username: string,
-    currentPassword: string,
-  ): Promise<void> {
-    this.user = await api.changeUsername(username, currentPassword);
-  }
-
-  async changePassword(
-    currentPassword: string,
-    newPassword: string,
-  ): Promise<void> {
-    await api.changePassword(currentPassword, newPassword);
   }
 }
 

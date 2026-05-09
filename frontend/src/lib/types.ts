@@ -43,7 +43,7 @@ export interface Room {
   code: string | null;
   name: string | null;
   is_public: boolean;
-  leader_id: string;
+  leader_id: string | null;
   status: RoomStatus;
   settings: RoomSettings;
   players: RoomPlayer[];
@@ -61,12 +61,6 @@ export interface PublicRoom {
   status: RoomStatus;
   joins_as_spectator: boolean;
   game_mode: GameMode;
-}
-
-export interface MyRoom {
-  id: string;
-  name: string | null;
-  status: RoomStatus;
 }
 
 export interface SongCandidate {

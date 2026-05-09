@@ -603,17 +603,6 @@
                       disabled={submitting}
                       onclick={() => pickGuess(r)}
                     >
-                      {#if r.album_image_url}
-                        <img
-                          src={r.album_image_url}
-                          alt=""
-                          class="h-10 w-10 flex-shrink-0 rounded"
-                        />
-                      {:else}
-                        <div
-                          class="h-10 w-10 flex-shrink-0 rounded bg-surface"
-                        ></div>
-                      {/if}
                       <span class="min-w-0 flex-1">
                         <span class="block truncate font-medium">{r.title}</span>
                         <span

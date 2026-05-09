@@ -15,7 +15,10 @@
 
   onMount(async () => {
     if (!auth.user) {
-      goto('/login');
+      // Joining requires picking a name on the home page first. Forward
+      // any share-link code so the home page can prefill the join modal.
+      const code = $page.url.searchParams.get('code');
+      goto(code ? `/?code=${encodeURIComponent(code)}` : '/');
       return;
     }
     const id = $page.params.id;
@@ -23,21 +26,17 @@
       connectError = 'missing room id';
       return;
     }
-    const code = $page.url.searchParams.get('code');
     try {
       const existing = await api.getRoom(id);
       const isMember = existing.players.some((p) => p.user.id === auth.user!.id);
       if (!isMember) {
-        // Private rooms only accept join-by-id from existing members; use the
-        // code from the share link to admit a first-time joiner.
-        if (code) {
-          await api.joinByCode(code);
-        } else {
-          await api.joinRoom(id);
-        }
+        // The user has a session but isn't in this room. Send them home to
+        // pick a name (they'd need a fresh identity per the per-room model).
+        goto('/');
+        return;
       }
-      if (code) {
-        // Strip the code from the URL so it doesn't linger in history/refreshes.
+      // Strip any leftover ?code= from the URL so it doesn't linger.
+      if ($page.url.searchParams.has('code')) {
         const cleanUrl = `${$page.url.pathname}${$page.url.hash}`;
         history.replaceState(history.state, '', cleanUrl);
       }
