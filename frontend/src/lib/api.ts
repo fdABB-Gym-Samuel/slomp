@@ -1,5 +1,4 @@
 import type {
-  ArtistSummary,
   GuessResult,
   MyRoom,
   PublicRoom,
@@ -8,7 +7,6 @@ import type {
   RoomStatus,
   ScoreboardEntry,
   SkipResult,
-  SongCandidate,
   SubmittedSong,
   User,
 } from "./types";
@@ -153,21 +151,4 @@ export const api = {
       body: JSON.stringify({ round_id: roundId }),
     }),
   results: (id: string) => request<ScoreboardEntry[]>(`/rooms/${id}/results`),
-
-  spotifySearch: (q: string, roomId?: string) => {
-    const params = new URLSearchParams({ q });
-    if (roomId) params.set("room_id", roomId);
-    return request<SongCandidate[]>(`/spotify/search?${params}`);
-  },
-
-  spotifySearchArtists: (q: string) => {
-    const params = new URLSearchParams({ q });
-    return request<ArtistSummary[]>(`/spotify/artists/search?${params}`);
-  },
-
-  spotifyGetArtists: (ids: string[]) => {
-    if (ids.length === 0) return Promise.resolve<ArtistSummary[]>([]);
-    const params = new URLSearchParams({ ids: ids.join(",") });
-    return request<ArtistSummary[]>(`/spotify/artists?${params}`);
-  },
 };

@@ -9,7 +9,6 @@ export default defineConfig({
     proxy: {
       "/auth": "http://localhost:8000",
       "/me": "http://localhost:8000",
-      "/spotify": "http://localhost:8000",
       "/health": "http://localhost:8000",
       // Note: only HTTP traffic for /rooms is proxied here. The WebSocket
       // (/rooms/{code}/ws) bypasses vite and connects directly to the

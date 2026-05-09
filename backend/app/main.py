@@ -8,7 +8,6 @@ from .config import settings
 from .routers import auth as auth_router
 from .routers import game as game_router
 from .routers import rooms as rooms_router
-from .routers import spotify as spotify_router
 from .routers import ws as ws_router
 
 
@@ -37,7 +36,6 @@ app.include_router(auth_router.router)
 app.include_router(auth_router.router_me)
 app.include_router(rooms_router.router)
 app.include_router(game_router.router)
-app.include_router(spotify_router.router)
 app.include_router(ws_router.router)
 
 

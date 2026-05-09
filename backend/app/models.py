@@ -114,9 +114,11 @@ class PublicRoomOut(BaseModel):
     leader_username: str
     player_count: int
     songs_per_player: int
+    random_song_count: int
     cleanup_at: float | None = None
     status: RoomStatus = "lobby"
     joins_as_spectator: bool = False
+    game_mode: GameMode = "classic"
 
 
 class MyRoomOut(BaseModel):

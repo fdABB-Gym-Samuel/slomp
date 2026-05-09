@@ -1,6 +1,7 @@
 <script lang="ts">
   import { SvelteSet } from 'svelte/reactivity';
-  import { api, APIError } from '$lib/api';
+  import { APIError } from '$lib/api';
+  import { getArtists, searchArtists } from '$lib/deezer';
   import type { ArtistSummary } from '$lib/types';
 
   let {
@@ -32,8 +33,7 @@
     );
     if (missing.length === 0) return;
     for (const id of missing) requested.add(id);
-    api
-      .spotifyGetArtists(missing)
+    getArtists(missing)
       .then((artists) => {
         for (const a of artists) cache[a.id] = a;
       })
@@ -56,10 +56,10 @@
     searching = true;
     error = null;
     try {
-      results = await api.spotifySearchArtists(q);
+      results = await searchArtists(q);
       for (const a of results) cache[a.id] = a;
     } catch (e) {
-      error = e instanceof APIError ? e.message : String(e);
+      error = e instanceof APIError ? e.message : (e as Error).message;
     } finally {
       searching = false;
     }

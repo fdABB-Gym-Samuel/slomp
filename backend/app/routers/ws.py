@@ -89,7 +89,9 @@ async def _auto_leave_if_stale(room_id: UUID, user_id: UUID) -> None:
     await broadcast_public_room_change(room_id)
 
 
-async def _replay_active_round(websocket: WebSocket, key: str, user_id: UUID) -> None:
+async def _replay_active_round(
+    websocket: WebSocket, key: str, user_id: UUID, spectating: bool
+) -> None:
     """Re-emit whatever round-scoped events a mid-round reconnect needs to
     rebuild the UI: either the live round in progress, or the post-round
     intermission scoreboard if we're between rounds. Mirrors the live
@@ -114,6 +116,22 @@ async def _replay_active_round(websocket: WebSocket, key: str, user_id: UUID) ->
         await websocket.send_json({"type": "round_ended", "payload": payload})
         return
 
+    # A non-spectator who joined after the round started is missing from
+    # active.players (which was built from room_players at round-start). Slot
+    # them in at bracket 0 so they can guess this round, see the obscured
+    # cover, and fetch sliced audio — instead of being treated as "finished".
+    async with game.lock:
+        active = game.active_round
+        if (
+            active is not None
+            and not spectating
+            and user_id not in active.picker_ids
+            and user_id not in active.players
+        ):
+            active.players[user_id] = state.PlayerRoundState(user_id=user_id)
+
+    if game.active_round is None:
+        return
     active = game.active_round
 
     audio_url = f"/rooms/{key}/rounds/{active.round_id}/audio"
@@ -236,6 +254,14 @@ async def room_ws(websocket: WebSocket, room_id: UUID) -> None:
                 room["id"],
                 user_id,
             )
+            spectating = bool(
+                await conn.fetchval(
+                    "SELECT spectating FROM room_players "
+                    "WHERE room_id = $1 AND user_id = $2",
+                    room["id"],
+                    user_id,
+                )
+            )
             snapshot = await build_room_out(conn, room)
 
         await websocket.send_json(
@@ -244,7 +270,7 @@ async def room_ws(websocket: WebSocket, room_id: UUID) -> None:
         # Re-hydrate a mid-round reconnect. `room_state` only carries lobby
         # data; without this replay the client sits on the "Setting up the
         # next round…" placeholder until the round naturally ends.
-        await _replay_active_round(websocket, key, user_id)
+        await _replay_active_round(websocket, key, user_id, spectating)
         await state.hub.broadcast(
             key,
             {"type": "player_joined", "payload": {"user_id": str(user_id)}},

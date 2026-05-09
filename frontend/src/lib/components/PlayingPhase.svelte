@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api, APIError } from '$lib/api';
+  import { searchSongs } from '$lib/deezer';
   import { auth } from '$lib/auth.svelte';
   import { room } from '$lib/ws.svelte';
   import type { Room, SongCandidate } from '$lib/types';
@@ -11,6 +12,8 @@
   let searchResults = $state<SongCandidate[]>([]);
   let searching = $state(false);
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
+  let highlightedIndex = $state(0);
+  let resultListEl: HTMLUListElement | null = $state(null);
 
   let lastResult = $state<{ correct: boolean; points: number } | null>(null);
   // The player's own guess/skip history for the active round lives on the
@@ -199,6 +202,34 @@
     searchTimer = setTimeout(runSearch, 300);
   }
 
+  $effect(() => {
+    searchResults;
+    highlightedIndex = 0;
+  });
+
+  $effect(() => {
+    if (!resultListEl) return;
+    const el = resultListEl.children[highlightedIndex] as HTMLElement | undefined;
+    el?.scrollIntoView({ block: 'nearest' });
+  });
+
+  function onSearchKeyDown(e: KeyboardEvent) {
+    if (searchResults.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      highlightedIndex = (highlightedIndex + 1) % searchResults.length;
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      highlightedIndex =
+        (highlightedIndex - 1 + searchResults.length) % searchResults.length;
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (submitting) return;
+      const r = searchResults[highlightedIndex];
+      if (r) pickGuess(r);
+    }
+  }
+
   async function runSearch() {
     const q = query.trim();
     if (!q) {
@@ -208,12 +239,11 @@
     searching = true;
     error = null;
     try {
-      // Pass the room id so the search applies the room's rules (popularity,
-      // required artists). No point letting players guess songs the picker
-      // couldn't have submitted.
-      searchResults = await api.spotifySearch(q, roomData.id);
+      // Apply the room's rules (popularity, required artists) so we don't
+      // suggest tracks the picker couldn't have submitted.
+      searchResults = await searchSongs(q, roomData.settings);
     } catch (e) {
-      error = e instanceof APIError ? e.message : String(e);
+      error = e instanceof APIError ? e.message : (e as Error).message;
     } finally {
       searching = false;
     }
@@ -523,6 +553,7 @@
                 placeholder="Search the song you think it is…"
                 bind:value={query}
                 oninput={onQueryInput}
+                onkeydown={onSearchKeyDown}
                 disabled={submitting}
               />
               <button
@@ -560,13 +591,15 @@
             {/if}
             {#if searchResults.length > 0}
               <ul
+                bind:this={resultListEl}
                 class="max-h-72 overflow-y-auto rounded-md border border-border bg-surface-raised"
               >
-                {#each searchResults as r (r.spotify_track_id)}
+                {#each searchResults as r, i (r.spotify_track_id)}
                   <li>
                     <button
                       type="button"
                       class="flex w-full items-center gap-3 p-2 text-left hover:bg-surface disabled:opacity-50"
+                      class:bg-surface={highlightedIndex === i}
                       disabled={submitting}
                       onclick={() => pickGuess(r)}
                     >

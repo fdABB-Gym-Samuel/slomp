@@ -226,7 +226,9 @@ def _public_room_payload(row: asyncpg.Record) -> dict:
         raw = json.loads(raw)
     settings = raw or {}
     spp = settings.get("songs_per_player", 3)
+    rsc = settings.get("random_song_count", 10)
     locked = bool(settings.get("lock_after_lobby", False))
+    game_mode = settings.get("game_mode", "classic")
     # When `lock_after_lobby` is on and the game has left the lobby, joining
     # is still allowed but the new player sits out until the current game
     # finishes. The browser surfaces this so the user knows what they're
@@ -238,9 +240,11 @@ def _public_room_payload(row: asyncpg.Record) -> dict:
         "leader_username": row["leader_username"],
         "player_count": row["player_count"],
         "songs_per_player": spp,
+        "random_song_count": rsc,
         "cleanup_at": state.empty_room_deadlines.get(str(row["id"])),
         "status": row["status"],
         "joins_as_spectator": joins_as_spectator,
+        "game_mode": game_mode,
     }
 
 

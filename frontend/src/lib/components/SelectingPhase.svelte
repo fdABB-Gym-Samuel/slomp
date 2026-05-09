@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api, APIError } from '$lib/api';
+  import { searchSongs } from '$lib/deezer';
   import { auth } from '$lib/auth.svelte';
   import type { Room, SongCandidate, SubmittedSong } from '$lib/types';
   import PlayerList from './PlayerList.svelte';
@@ -13,6 +14,30 @@
   let submitting = $state<string | null>(null);
   let error = $state<string | null>(null);
   let starting = $state(false);
+
+  // Inline preview player for the picking phase. Plays Deezer's preview MP3
+  // straight from cdnt-preview.dzcdn.net so no audio bytes go through our
+  // backend. One shared <audio> element; `previewPlayingId` is the
+  // spotify_track_id (Deezer id) of whatever's currently audible.
+  let audio: HTMLAudioElement | null = $state(null);
+  let previewPlayingId = $state<string | null>(null);
+
+  function togglePreview(trackId: string, previewUrl: string | null) {
+    if (!previewUrl || !audio) return;
+    if (previewPlayingId === trackId) {
+      audio.pause();
+      return;
+    }
+    audio.src = previewUrl;
+    previewPlayingId = trackId;
+    audio.play().catch(() => {
+      previewPlayingId = null;
+    });
+  }
+
+  function onPreviewPause() {
+    previewPlayingId = null;
+  }
 
   const isLeader = $derived(auth.user?.id === roomData.leader_id);
   const quota = $derived(roomData.settings.songs_per_player);
@@ -42,9 +67,9 @@
     searching = true;
     error = null;
     try {
-      results = await api.spotifySearch(q, roomData.id);
+      results = await searchSongs(q, roomData.settings);
     } catch (e) {
-      error = e instanceof APIError ? e.message : String(e);
+      error = e instanceof APIError ? e.message : (e as Error).message;
     } finally {
       searching = false;
     }
@@ -65,6 +90,7 @@
   async function submit(track: SongCandidate) {
     submitting = track.spotify_track_id;
     error = null;
+    if (audio && previewPlayingId === track.spotify_track_id) audio.pause();
     try {
       await api.submitSong(roomData.id, track.spotify_track_id);
       await loadMine();
@@ -76,6 +102,10 @@
   }
 
   async function remove(songId: string) {
+    const target = mySongs.find((m) => m.id === songId);
+    if (audio && target && previewPlayingId === target.spotify_track_id) {
+      audio.pause();
+    }
     try {
       await api.deleteSong(roomData.id, songId);
       await loadMine();
@@ -131,24 +161,44 @@
             <li
               class="flex items-center gap-3 rounded-md border border-border bg-surface-raised p-3"
             >
-              {#if r.album_image_url}
-                <img
-                  src={r.album_image_url}
-                  alt=""
-                  class="h-12 w-12 flex-shrink-0 rounded"
-                />
-              {:else}
-                <div class="h-12 w-12 flex-shrink-0 rounded bg-surface"></div>
-              {/if}
+              <div class="relative h-12 w-12 flex-shrink-0 overflow-hidden rounded">
+                {#if r.album_image_url}
+                  <img src={r.album_image_url} alt="" class="h-full w-full" />
+                {:else}
+                  <div class="h-full w-full bg-surface"></div>
+                {/if}
+                {#if r.preview_url}
+                  {@const isPlaying = previewPlayingId === r.spotify_track_id}
+                  <button
+                    type="button"
+                    class="absolute inset-0 flex items-center justify-center bg-black/50 text-white transition-opacity hover:opacity-100 focus:opacity-100"
+                    class:opacity-0={!isPlaying}
+                    class:opacity-100={isPlaying}
+                    onclick={() => togglePreview(r.spotify_track_id, r.preview_url)}
+                    aria-label={isPlaying ? 'Pause preview' : 'Play preview'}
+                  >
+                    {#if isPlaying}
+                      <svg viewBox="0 0 24 24" fill="currentColor" class="h-5 w-5" aria-hidden="true">
+                        <rect x="6" y="5" width="4" height="14" rx="1" />
+                        <rect x="14" y="5" width="4" height="14" rx="1" />
+                      </svg>
+                    {:else}
+                      <svg viewBox="0 0 24 24" fill="currentColor" class="h-5 w-5" aria-hidden="true">
+                        <polygon points="6 4 20 12 6 20 6 4" />
+                      </svg>
+                    {/if}
+                  </button>
+                {/if}
+              </div>
               <div class="min-w-0 flex-1">
                 <p class="truncate font-medium">{r.title}</p>
                 <p class="truncate text-sm text-text-secondary">
                   {r.artist}{#if r.album} · {r.album}{/if}
                 </p>
               </div>
-              <span class="text-xs text-text-muted">{r.popularity ?? '?'}</span>
+              <span class="flex-shrink-0 text-xs text-text-muted">{r.popularity ?? '?'}</span>
               <button
-                class="btn-secondary text-sm"
+                class="btn-secondary flex-shrink-0 text-sm"
                 disabled={submitting !== null ||
                   mySongs.some((m) => m.spotify_track_id === r.spotify_track_id)}
                 onclick={() => submit(r)}
@@ -171,15 +221,41 @@
             <li
               class="flex items-center gap-3 rounded-md border border-border bg-surface-raised p-3"
             >
-              {#if s.album_image_url}
-                <img src={s.album_image_url} alt="" class="h-10 w-10 rounded" />
-              {/if}
-              <div class="flex-1">
-                <p class="font-medium">{s.title}</p>
-                <p class="text-sm text-text-secondary">{s.artist}</p>
+              <div class="relative h-10 w-10 flex-shrink-0 overflow-hidden rounded">
+                {#if s.album_image_url}
+                  <img src={s.album_image_url} alt="" class="h-full w-full" />
+                {:else}
+                  <div class="h-full w-full bg-surface"></div>
+                {/if}
+                {#if s.preview_url}
+                  {@const isPlaying = previewPlayingId === s.spotify_track_id}
+                  <button
+                    type="button"
+                    class="absolute inset-0 flex items-center justify-center bg-black/50 text-white transition-opacity hover:opacity-100 focus:opacity-100"
+                    class:opacity-0={!isPlaying}
+                    class:opacity-100={isPlaying}
+                    onclick={() => togglePreview(s.spotify_track_id, s.preview_url)}
+                    aria-label={isPlaying ? 'Pause preview' : 'Play preview'}
+                  >
+                    {#if isPlaying}
+                      <svg viewBox="0 0 24 24" fill="currentColor" class="h-4 w-4" aria-hidden="true">
+                        <rect x="6" y="5" width="4" height="14" rx="1" />
+                        <rect x="14" y="5" width="4" height="14" rx="1" />
+                      </svg>
+                    {:else}
+                      <svg viewBox="0 0 24 24" fill="currentColor" class="h-4 w-4" aria-hidden="true">
+                        <polygon points="6 4 20 12 6 20 6 4" />
+                      </svg>
+                    {/if}
+                  </button>
+                {/if}
+              </div>
+              <div class="min-w-0 flex-1">
+                <p class="truncate font-medium">{s.title}</p>
+                <p class="truncate text-sm text-text-secondary">{s.artist}</p>
               </div>
               <button
-                class="btn-ghost text-sm text-danger"
+                class="btn-ghost flex-shrink-0 text-sm text-danger"
                 onclick={() => remove(s.id)}>Remove</button
               >
             </li>
@@ -187,6 +263,7 @@
         </ul>
       {/if}
     </div>
+    <audio bind:this={audio} onpause={onPreviewPause} onended={onPreviewPause}></audio>
     {/if}
   </div>
 

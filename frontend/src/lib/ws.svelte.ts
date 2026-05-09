@@ -201,6 +201,7 @@ class RoomConnection {
         break;
 
       case "song_submitted":
+      case "song_removed":
         if (this.room) {
           const p = this.room.players.find(
             (x) => x.user.id === ev.payload.user_id,

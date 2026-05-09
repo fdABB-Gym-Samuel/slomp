@@ -325,13 +325,23 @@
                 <span class="badge {STAGE_BADGE[room.status].cls}">
                   {STAGE_BADGE[room.status].label}
                 </span>
+                {#if room.game_mode === 'random'}
+                  <span class="badge bg-accent/20 text-accent">random</span>
+                {:else}
+                  <span class="badge bg-text-muted/20 text-text-secondary">classic</span>
+                {/if}
               </div>
               <p class="mt-1 text-xs text-text-muted">
                 hosted by <span class="text-text-secondary">{room.leader_username}</span>
                 · {room.player_count}
                 {room.player_count === 1 ? 'player' : 'players'}
-                · {room.songs_per_player}
-                {room.songs_per_player === 1 ? 'song' : 'songs'} each
+                {#if room.game_mode === 'random'}
+                  · {room.random_song_count}
+                  {room.random_song_count === 1 ? 'song' : 'songs'}
+                {:else}
+                  · {room.songs_per_player}
+                  {room.songs_per_player === 1 ? 'song' : 'songs'} each
+                {/if}
               </p>
               {#if room.cleanup_at}
                 <p class="mt-1 text-xs text-danger">

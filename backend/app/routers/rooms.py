@@ -846,6 +846,20 @@ async def delete_song(
                 """,
                 song_id,
             )
+            remaining = await conn.fetchval(
+                "SELECT count(*)::int FROM room_song_pickers "
+                "WHERE room_id = $1 AND user_id = $2",
+                room["id"],
+                user_id,
+            )
+
+    await state.hub.broadcast(
+        room_key(room),
+        {
+            "type": "song_removed",
+            "payload": {"user_id": str(user_id), "count": remaining},
+        },
+    )
     return Response(status_code=204)
 
 

@@ -56,9 +56,11 @@ export interface PublicRoom {
   leader_username: string;
   player_count: number;
   songs_per_player: number;
+  random_song_count: number;
   cleanup_at: number | null;
   status: RoomStatus;
   joins_as_spectator: boolean;
+  game_mode: GameMode;
 }
 
 export interface MyRoom {

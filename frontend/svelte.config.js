@@ -15,7 +15,10 @@ export default {
     csp: {
       mode: "hash",
       directives: {
-        "script-src": ["self"],
+        // api.deezer.com is whitelisted so the JSONP <script> tags from
+        // src/lib/deezer.ts can load. Deezer's REST endpoints don't send
+        // CORS headers, so JSONP is the only browser-direct option.
+        "script-src": ["self", "https://api.deezer.com"],
       },
     },
   },

@@ -6,16 +6,16 @@ import random
 from collections import defaultdict
 from uuid import UUID
 
+from fastapi import HTTPException, status
+
+from . import db, deezer, matching, state
+from .models import RoomSettings, serialize_settings
+
 # When everybody who could play this song is also a picker (everyone picked
 # the same track, or a tiny game with one non-picker who got assigned), the
 # round has nobody to guess. Hold the round_started UI for a beat so it
 # doesn't feel like the song was skipped, then advance to intermission.
 NO_GUESSERS_DURATION = 1.0
-
-from fastapi import HTTPException, status
-
-from . import db, deezer, matching, state
-from .models import RoomSettings, serialize_settings
 
 
 def _score_for_bracket(bracket_index: int, brackets: list[float]) -> int:

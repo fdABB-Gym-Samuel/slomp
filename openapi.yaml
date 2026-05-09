@@ -35,6 +35,7 @@ info:
       - `settings_updated`     — `{ settings }`
       - `phase_changed`        — `{ status, started_at? }`
       - `song_submitted`       — `{ user_id, count }` (no track details — leaks answers)
+      - `song_removed`         — `{ user_id, count }` (picker dropped one of their songs)
       - `round_started`        — `{ round_id, picker_ids, started_at_server,
                                      audio_url, album_image_url?,
                                      guess_brackets_seconds, round_max_seconds }`
@@ -690,34 +691,6 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/ScoreboardEntry" }
         "409": { $ref: "#/components/responses/Conflict" }
-
-  /spotify/search:
-    get:
-      summary: Search Spotify, optionally pre-filtered by a room's rules
-      description: |
-        Backend hits Spotify's `/search` with Client Credentials and filters
-        out tracks that don't match the room's settings (if `room_code` set).
-        Tracks without a `preview_url` are also filtered out, since they're
-        unplayable in the game.
-      parameters:
-        - name: q
-          in: query
-          required: true
-          schema: { type: string }
-        - name: room_code
-          in: query
-          schema: { type: string }
-        - name: limit
-          in: query
-          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
-      responses:
-        "200":
-          description: Matches
-          content:
-            application/json:
-              schema:
-                type: array
-                items: { $ref: "#/components/schemas/SongCandidate" }
 
   /rooms/{code}/ws:
     parameters:
